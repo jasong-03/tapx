@@ -1,126 +1,80 @@
-import { Transaction, coinWithBalance } from '@mysten/sui/transactions';
-import type { SuiJsonRpcClient } from '@mysten/sui/jsonRpc';
-
-const DEEPBOOK_PKG = '0x2c8d603bc51326b8c13cef9dd07031a408a48dddb541963c8e04b1a1af5f7cf3';
-
-// BalanceManager module type
-const BALANCE_MANAGER_TYPE = `${DEEPBOOK_PKG}::balance_manager::BalanceManager`;
+import { Transaction } from '@mysten/sui/transactions';
+import type { DeepBookClient } from '@mysten/deepbook-v3';
 
 /**
- * Query for existing BalanceManager objects owned by sender
- * Returns objectId if found, null otherwise
+ * Create and share a new BalanceManager using the SDK.
  */
-export async function getOrCreateBalanceManager(
-  client: SuiJsonRpcClient,
-  sender: string
-): Promise<string | null> {
-  try {
-    const objects = await client.getOwnedObjects({
-      owner: sender,
-      filter: {
-        StructType: BALANCE_MANAGER_TYPE,
-      },
-      options: {
-        showContent: true,
-      },
-    });
-
-    if (objects.data.length > 0 && objects.data[0].data) {
-      return objects.data[0].data.objectId;
-    }
-
-    return null;
-  } catch (error) {
-    console.error('Error querying BalanceManager:', error);
-    return null;
-  }
+export function buildCreateBalanceManagerTx(
+  dbClient: DeepBookClient,
+  sender: string,
+): Transaction {
+  const tx = new Transaction();
+  tx.setSenderIfNotSet(sender);
+  dbClient.balanceManager.createAndShareBalanceManager()(tx);
+  return tx;
 }
 
 /**
- * Create a new BalanceManager object
- * Returns the transaction result that can be used for subsequent operations
+ * Deposit coins into a BalanceManager using the SDK.
+ * @param managerKey - Key identifying the balance manager in the SDK config
+ * @param coinKey - Key identifying the coin type (e.g., 'SUI', 'DEEP', 'USDC')
+ * @param amount - Human-readable amount to deposit
  */
-export function createBalanceManagerTx(tx: Transaction) {
-  const balanceManager = tx.moveCall({
-    target: `${DEEPBOOK_PKG}::balance_manager::new`,
-    arguments: [],
-  });
-
-  return balanceManager;
+export function buildDepositTx(
+  dbClient: DeepBookClient,
+  params: {
+    managerKey: string;
+    coinKey: string;
+    amount: number;
+    sender: string;
+  },
+): Transaction {
+  const tx = new Transaction();
+  tx.setSenderIfNotSet(params.sender);
+  dbClient.balanceManager.depositIntoManager(
+    params.managerKey,
+    params.coinKey,
+    params.amount,
+  )(tx);
+  return tx;
 }
 
 /**
- * Deposit coins into a BalanceManager
+ * Withdraw coins from a BalanceManager using the SDK.
+ * @param managerKey - Key identifying the balance manager in the SDK config
+ * @param coinKey - Key identifying the coin type
+ * @param amount - Human-readable amount to withdraw
+ * @param recipient - Address to send withdrawn coins to
  */
-export function depositToBalanceManager(
-  tx: Transaction,
-  balanceManagerId: string | ReturnType<typeof tx.moveCall>,
-  coinType: string,
-  amount: bigint
-) {
-  // Create coin to deposit
-  const coin = coinWithBalance({
-    type: coinType,
-    balance: amount,
-  });
-
-  const balanceManagerArg =
-    typeof balanceManagerId === 'string'
-      ? tx.object(balanceManagerId)
-      : balanceManagerId;
-
-  tx.moveCall({
-    target: `${DEEPBOOK_PKG}::balance_manager::deposit`,
-    typeArguments: [coinType],
-    arguments: [balanceManagerArg, tx.object(coin)],
-  });
+export function buildWithdrawTx(
+  dbClient: DeepBookClient,
+  params: {
+    managerKey: string;
+    coinKey: string;
+    amount: number;
+    recipient: string;
+    sender: string;
+  },
+): Transaction {
+  const tx = new Transaction();
+  tx.setSenderIfNotSet(params.sender);
+  dbClient.balanceManager.withdrawFromManager(
+    params.managerKey,
+    params.coinKey,
+    params.amount,
+    params.recipient,
+  )(tx);
+  return tx;
 }
 
 /**
- * Withdraw coins from a BalanceManager
- */
-export function withdrawFromBalanceManager(
-  tx: Transaction,
-  balanceManagerId: string,
-  coinType: string,
-  amount: bigint,
-  recipient: string
-) {
-  const [coin] = tx.moveCall({
-    target: `${DEEPBOOK_PKG}::balance_manager::withdraw`,
-    typeArguments: [coinType],
-    arguments: [tx.object(balanceManagerId), tx.pure.u64(amount)],
-  });
-
-  tx.transferObjects([coin], recipient);
-}
-
-/**
- * Get the balance of a specific coin type in the BalanceManager
+ * Check balance of a specific coin in a BalanceManager using the SDK.
+ * Returns human-readable balance.
  */
 export async function getBalanceManagerBalance(
-  client: SuiJsonRpcClient,
-  balanceManagerId: string,
-  coinType: string
-): Promise<bigint> {
-  try {
-    const result = await client.getDynamicFieldObject({
-      parentId: balanceManagerId,
-      name: {
-        type: '0x1::type_name::TypeName',
-        value: {
-          name: coinType,
-        },
-      },
-    });
-
-    if (result.data?.content && 'fields' in result.data.content) {
-      const fields = result.data.content.fields as { balance?: string };
-      return BigInt(fields.balance || '0');
-    }
-
-    return BigInt(0);
-  } catch {
-    return BigInt(0);
-  }
+  dbClient: DeepBookClient,
+  managerKey: string,
+  coinKey: string,
+): Promise<{ coinType: string; balance: number }> {
+  return dbClient.checkManagerBalance(managerKey, coinKey);
 }

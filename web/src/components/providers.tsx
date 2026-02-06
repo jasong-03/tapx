@@ -1,22 +1,30 @@
 "use client"
 
+import { useState, useEffect, type ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import dynamic from "next/dynamic";
 
 const queryClient = new QueryClient();
 
-// Dynamically import the DAppKit provider to avoid SSR issues
-const DAppKitProviderWrapper = dynamic(
-	() => import("./dapp-kit-provider").then((mod) => mod.DAppKitProviderWrapper),
-	{ ssr: false }
-);
+function LazyDAppKitProvider({ children }: { children: ReactNode }) {
+	const [Provider, setProvider] = useState<React.ComponentType<{ children: ReactNode }> | null>(null);
 
-export const Providers = ({ children }: { children: React.ReactNode }) => {
+	useEffect(() => {
+		import("./dapp-kit-provider").then((mod) => {
+			setProvider(() => mod.DAppKitProviderWrapper);
+		});
+	}, []);
+
+	if (!Provider) return <>{children}</>;
+
+	return <Provider>{children}</Provider>;
+}
+
+export const Providers = ({ children }: { children: ReactNode }) => {
 	return (
 		<QueryClientProvider client={queryClient}>
-			<DAppKitProviderWrapper>
+			<LazyDAppKitProvider>
 				{children}
-			</DAppKitProviderWrapper>
+			</LazyDAppKitProvider>
 		</QueryClientProvider>
 	);
 }

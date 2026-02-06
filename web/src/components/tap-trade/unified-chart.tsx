@@ -15,6 +15,8 @@ interface UnifiedChartProps {
   timeStepMs: number
   historyWindowMs: number
   bets: Bet[]
+  canBuy?: boolean
+  canSell?: boolean
   onCellClick: (
     row: number,
     col: number,
@@ -44,6 +46,8 @@ export function UnifiedChart({
   timeStepMs,
   historyWindowMs,
   bets,
+  canBuy = true,
+  canSell = true,
   onCellClick,
 }: UnifiedChartProps) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -61,7 +65,11 @@ export function UnifiedChart({
   const extraRows = 4
   const baseHalfRows = Math.floor(rows / 2)
   const totalVisibleRows = rows + extraRows * 2
-  const padding = { top: 30, right: 80, bottom: 40, left: 80 }
+  // Responsive padding: smaller on narrow screens
+  const isMobile = dimensions.width > 0 && dimensions.width < 500
+  const padding = isMobile
+    ? { top: 8, right: 58, bottom: 24, left: 12 }
+    : { top: 30, right: 80, bottom: 40, left: 80 }
 
   const totalTimeMs = historyWindowMs + cols * timeStepMs
   const futureTimeMs = cols * timeStepMs
@@ -219,7 +227,7 @@ export function UnifiedChart({
       }
 
       // Draw multipliers in grid cells
-      ctx.font = "11px monospace"
+      ctx.font = isMobile ? "9px monospace" : "11px monospace"
       ctx.textAlign = "center"
       ctx.textBaseline = "middle"
 
@@ -248,8 +256,14 @@ export function UnifiedChart({
               Math.abs(hoveredCell.absolutePrice - cellCenterPrice) < priceStep / 2 &&
               hoveredCell.col === col
 
+            // Determine if this cell's direction is affordable
+            const isBuyCell = cellCenterPrice >= (currentPrice ?? 0)
+            const isAffordable = isBuyCell ? canBuy : canSell
+
             if (isTooClose) {
               ctx.fillStyle = "rgba(255, 100, 100, 0.15)"
+            } else if (!isAffordable) {
+              ctx.fillStyle = "rgba(255, 150, 220, 0.08)"
             } else if (isHovered) {
               ctx.fillStyle = "rgba(255, 200, 255, 0.9)"
             } else {
@@ -539,26 +553,27 @@ export function UnifiedChart({
         ctx.stroke()
       }
 
-      // Draw time labels
-      ctx.font = "10px monospace"
+      // Draw time labels — skip some on mobile to prevent overlap
+      ctx.font = isMobile ? "8px monospace" : "10px monospace"
       ctx.fillStyle = "rgba(255, 255, 255, 0.4)"
       ctx.textAlign = "center"
+      const timeLabelStep = isMobile ? 3 : 1
 
-      for (let i = 0; i <= 6; i++) {
+      for (let i = 0; i <= 6; i += timeLabelStep) {
         const seconds = -60 + i * 10
         const t = now + seconds * 1000
         const x = padding.left + ((t - minTime) / totalTimeMs) * chartWidth
         if (x < nowX - 10) {
-          ctx.fillText(`${seconds}s`, x, dimensions.height - 12)
+          ctx.fillText(`${seconds}s`, x, dimensions.height - 8)
         }
       }
 
-      for (let i = 0; i <= cols; i++) {
+      for (let i = 0; i <= cols; i += timeLabelStep) {
         const slotTime = currentSlotStart + i * timeStepMs
         const x = getX(slotTime)
         const secondsFromNow = Math.round((slotTime - now) / 1000)
         if (x >= nowX + 10 && x <= dimensions.width - padding.right) {
-          ctx.fillText(`+${secondsFromNow}s`, x, dimensions.height - 12)
+          ctx.fillText(`+${secondsFromNow}s`, x, dimensions.height - 8)
         }
       }
 
@@ -580,24 +595,26 @@ export function UnifiedChart({
 
         if (isCurrentPriceRow) {
           ctx.fillStyle = "rgba(255, 100, 200, 1)"
-          ctx.font = "bold 11px monospace"
+          ctx.font = isMobile ? "bold 9px monospace" : "bold 11px monospace"
         } else {
           ctx.fillStyle = "rgba(255, 255, 255, 0.4)"
-          ctx.font = "10px monospace"
+          ctx.font = isMobile ? "8px monospace" : "10px monospace"
         }
         ctx.fillText(fmtPrice(price), x, y)
       }
 
-      // Draw price labels (left side)
-      ctx.textAlign = "left"
-      for (let price = lowestGridPrice; price <= highestGridPrice; price += rightLabelStep * 2) {
-        const y = priceToY(price)
+      // Draw price labels (left side) — skip on mobile to save space
+      if (!isMobile) {
+        ctx.textAlign = "left"
+        for (let price = lowestGridPrice; price <= highestGridPrice; price += rightLabelStep * 2) {
+          const y = priceToY(price)
 
-        if (y < padding.top - 5 || y > padding.top + chartHeight + 5) continue
+          if (y < padding.top - 5 || y > padding.top + chartHeight + 5) continue
 
-        ctx.fillStyle = "rgba(255, 255, 255, 0.25)"
-        ctx.font = "9px monospace"
-        ctx.fillText(fmtPrice(price), 5, y)
+          ctx.fillStyle = "rgba(255, 255, 255, 0.25)"
+          ctx.font = "9px monospace"
+          ctx.fillText(fmtPrice(price), 5, y)
+        }
       }
 
       animationRef.current = requestAnimationFrame(draw)
@@ -625,6 +642,8 @@ export function UnifiedChart({
     totalVisibleRows,
     totalTimeMs,
     futureTimeMs,
+    canBuy,
+    canSell,
   ])
 
   const handleClick = useCallback(
@@ -711,7 +730,7 @@ export function UnifiedChart({
       futureTimeMs,
       totalVisibleRows,
       onCellClick,
-      padding,
+      isMobile,
     ],
   )
 

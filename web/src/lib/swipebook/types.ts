@@ -8,6 +8,7 @@ export interface Token {
 }
 
 export interface Pool {
+  poolKey: string; // SDK pool key (e.g., "DEEP_SUI", "SUI_DBUSDC")
   address: string; // Pool object ID
   baseCoin: string; // Base coin symbol (e.g., "SUI")
   quoteCoin: string; // Quote coin symbol (e.g., "USDC")

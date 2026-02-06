@@ -1,20 +1,24 @@
 "use client"
 
+import { useRef } from "react";
 import { createDAppKit, DAppKitProvider, type DAppKit } from "@mysten/dapp-kit-react";
 import { SuiJsonRpcClient, getJsonRpcFullnodeUrl } from "@mysten/sui/jsonRpc";
+import { SUI_NETWORK } from "@/lib/deepbook/config";
 
 type AppDAppKit = DAppKit<["testnet", "mainnet"], SuiJsonRpcClient>;
 
-const dAppKit: AppDAppKit = createDAppKit({
-	networks: ["testnet", "mainnet"] as const,
-	defaultNetwork: (process.env.NEXT_PUBLIC_SUI_NETWORK as "testnet" | "mainnet") || "mainnet",
-	createClient(network) {
-		return new SuiJsonRpcClient({
-			url: getJsonRpcFullnodeUrl(network),
-			network
-		});
-	},
-});
+function makeDAppKit(): AppDAppKit {
+	return createDAppKit({
+		networks: ["testnet", "mainnet"] as const,
+		defaultNetwork: SUI_NETWORK,
+		createClient(network) {
+			return new SuiJsonRpcClient({
+				url: getJsonRpcFullnodeUrl(network),
+				network
+			});
+		},
+	});
+}
 
 declare module "@mysten/dapp-kit-react" {
 	interface Register {
@@ -23,8 +27,13 @@ declare module "@mysten/dapp-kit-react" {
 }
 
 export const DAppKitProviderWrapper = ({ children }: { children: React.ReactNode }) => {
+	const dAppKitRef = useRef<AppDAppKit | null>(null);
+	if (!dAppKitRef.current) {
+		dAppKitRef.current = makeDAppKit();
+	}
+
 	return (
-		<DAppKitProvider dAppKit={dAppKit}>
+		<DAppKitProvider dAppKit={dAppKitRef.current}>
 			{children}
 		</DAppKitProvider>
 	);

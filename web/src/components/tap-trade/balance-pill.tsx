@@ -20,13 +20,13 @@ export function BalancePill({ balance, coinSymbol, isLoading, isConnected }: Bal
   }
 
   return (
-    <div className="flex items-center gap-2 rounded-full bg-secondary/80 backdrop-blur-sm px-4 py-2 border border-border/50">
+    <div className="flex items-center gap-1.5 rounded-full bg-secondary/80 backdrop-blur-sm px-3 py-1.5 border border-border/50">
       {isLoading ? (
-        <Loader2 className="w-4 h-4 text-neon-lime animate-spin" />
+        <Loader2 className="w-3.5 h-3.5 text-neon-lime animate-spin" />
       ) : (
-        <Wallet className="w-4 h-4 text-neon-lime" />
+        <Wallet className="w-3.5 h-3.5 text-neon-lime" />
       )}
-      <span className="text-sm font-mono font-semibold text-foreground">{display}</span>
+      <span className="text-xs sm:text-sm font-mono font-semibold text-foreground">{display}</span>
     </div>
   )
 }

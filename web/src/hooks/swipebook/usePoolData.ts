@@ -5,18 +5,16 @@ import { Transaction } from '@mysten/sui/transactions';
 import { bcs } from '@mysten/sui/bcs';
 import type { SuiJsonRpcClient } from '@mysten/sui/jsonRpc';
 import type { Pool, PoolWithMarketData } from '@/lib/swipebook/types';
-
-const DEEPBOOK_PACKAGE_ID = '0x2c8d603bc51326b8c13cef9dd07031a408a48dddb541963c8e04b1a1af5f7cf3';
-const DUMMY_SENDER = '0x44e12ed495a913b594b5b73c5358b6a6516d4e3742f7a0dcdec12053b6b0aced';
+import { DEEPBOOK_PACKAGE_ID, DUMMY_SENDER } from '@/lib/deepbook/config';
 
 /**
- * Fetch orderbook data for a single pool
+ * Fetch orderbook data for a single pool using raw devInspect.
  */
 export function usePoolData(pool: Pool | null) {
   const client = useCurrentClient() as SuiJsonRpcClient;
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ['pool-data', pool?.address],
+    queryKey: ['pool-data', pool?.poolKey],
     queryFn: async () => {
       if (!pool) return null;
 
@@ -60,13 +58,16 @@ export function usePoolData(pool: Pool | null) {
       const bestBidRaw = result.results[1]?.returnValues?.[0];
       const bestAskRaw = result.results[2]?.returnValues?.[0];
 
+      // Adjust for decimal difference between base and quote coins
+      const decimalAdjustment = Math.pow(10, pool.baseDecimals - pool.quoteDecimals);
+
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const parsePrice = (raw: any): number => {
         if (!raw || raw[1] !== 'u64') return 0;
         const bytes = new Uint8Array(raw[0]);
         const value = bcs.u64().parse(bytes);
-        // DeepBook prices have 9 decimal places
-        return Number(value) / 1e9;
+        // DeepBook prices have 9 decimal places (FLOAT_SCALAR)
+        return (Number(value) / 1e9) * decimalAdjustment;
       };
 
       return {
@@ -76,7 +77,7 @@ export function usePoolData(pool: Pool | null) {
       };
     },
     enabled: !!pool && !!client,
-    refetchInterval: 5000, // Refresh every 5 seconds
+    refetchInterval: 5000,
     staleTime: 2000,
   });
 
@@ -93,7 +94,6 @@ export function usePoolData(pool: Pool | null) {
       bestAsk: data.bestAsk,
       spread,
       spreadPercent,
-      // These would need additional API calls or indexer data
       volume24h: 0,
       priceChange24h: 0,
       priceChangePercent24h: 0,

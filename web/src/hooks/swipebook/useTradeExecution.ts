@@ -1,14 +1,13 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useCurrentAccount, useDAppKit } from '@mysten/dapp-kit-react';
-import { toast } from 'sonner';
 import type { Transaction } from '@mysten/sui/transactions';
 import type { Pool, TradeSide, TradeResult } from '@/lib/swipebook/types';
 import {
   buildMarketBuyTransaction,
   buildMarketSellTransaction,
-  toOnChainAmount,
   calculateMinOutput,
 } from '@/lib/deepbook/transactions';
+import { useDeepBookClient } from './useDeepBookClient';
 
 interface ExecuteTradeParams {
   pool: Pool;
@@ -19,12 +18,49 @@ interface ExecuteTradeParams {
 }
 
 /**
- * Hook for executing trades on DeepBook
+ * Extract digest and success status from dApp Kit signAndExecuteTransaction result.
+ * The result is a discriminated union: { $kind: 'Transaction' | 'FailedTransaction' }
+ */
+function parseTransactionResult(result: unknown): { digest: string; success: boolean; error?: string } {
+  const r = result as Record<string, unknown>;
+
+  // dApp Kit v2: discriminated union with $kind
+  if (r.$kind === 'Transaction' && r.Transaction) {
+    const tx = r.Transaction as Record<string, unknown>;
+    const status = tx.status as { success: boolean; error?: { message?: string } } | undefined;
+    return {
+      digest: (tx.digest as string) || 'unknown',
+      success: status?.success !== false,
+      error: status?.success === false ? (status.error?.message || 'Transaction failed on-chain') : undefined,
+    };
+  }
+
+  if (r.$kind === 'FailedTransaction' && r.FailedTransaction) {
+    const tx = r.FailedTransaction as Record<string, unknown>;
+    const status = tx.status as { error?: { message?: string } } | undefined;
+    return {
+      digest: (tx.digest as string) || 'unknown',
+      success: false,
+      error: status?.error?.message || 'Transaction failed on-chain',
+    };
+  }
+
+  // Fallback: try common property paths
+  if (typeof r.digest === 'string') {
+    return { digest: r.digest, success: true };
+  }
+
+  return { digest: 'unknown', success: false, error: 'Could not parse transaction result' };
+}
+
+/**
+ * Hook for executing trades on DeepBook using the SDK client.
  */
 export function useTradeExecution() {
   const currentAccount = useCurrentAccount();
   const dAppKit = useDAppKit();
   const queryClient = useQueryClient();
+  const dbClient = useDeepBookClient();
 
   const { mutate, mutateAsync, isPending, error, reset } = useMutation({
     mutationFn: async (params: ExecuteTradeParams): Promise<TradeResult> => {
@@ -33,62 +69,48 @@ export function useTradeExecution() {
       if (!currentAccount) {
         throw new Error('Wallet not connected');
       }
+      if (!dbClient) {
+        throw new Error('DeepBook client not initialized');
+      }
 
+      const minOut = calculateMinOutput(estimatedOutput, slippagePercent);
       let tx: Transaction;
 
       if (side === 'buy') {
-        // Buying base with quote
-        const quoteAmount = toOnChainAmount(amount, pool.quoteDecimals);
-        const minBaseOut = calculateMinOutput(
-          toOnChainAmount(estimatedOutput, pool.baseDecimals),
-          slippagePercent
-        );
-
-        tx = buildMarketBuyTransaction({
-          pool,
-          quoteAmount,
-          minBaseOut,
+        tx = buildMarketBuyTransaction(dbClient, {
+          poolKey: pool.poolKey,
+          quoteAmount: amount,
+          minBaseOut: minOut,
           sender: currentAccount.address,
         });
       } else {
-        // Selling base for quote
-        const baseAmount = toOnChainAmount(amount, pool.baseDecimals);
-        const minQuoteOut = calculateMinOutput(
-          toOnChainAmount(estimatedOutput, pool.quoteDecimals),
-          slippagePercent
-        );
-
-        tx = buildMarketSellTransaction({
-          pool,
-          baseAmount,
-          minQuoteOut,
+        tx = buildMarketSellTransaction(dbClient, {
+          poolKey: pool.poolKey,
+          baseAmount: amount,
+          minQuoteOut: minOut,
           sender: currentAccount.address,
         });
       }
 
       const result = await dAppKit.signAndExecuteTransaction({ transaction: tx });
+      const parsed = parseTransactionResult(result);
 
-      // The result type from dapp-kit-react v1 may vary
-      // Extract digest from the result
-      const digest = 'digest' in result ? (result as { digest: string }).digest :
-                     'Transaction' in result ? 'pending' : 'unknown';
+      if (!parsed.success) {
+        throw new Error(parsed.error || `Transaction failed (${parsed.digest.slice(0, 10)}...)`);
+      }
 
       return {
         success: true,
-        digest,
+        digest: parsed.digest,
         timestamp: Date.now(),
       };
     },
-    onSuccess: (result) => {
-      toast.success(`Trade successful! TX: ${result.digest?.slice(0, 8)}...`);
-
-      // Invalidate balance queries to refresh user balances
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['user-balance'] });
       queryClient.invalidateQueries({ queryKey: ['pool-market-data'] });
     },
     onError: (error) => {
       console.error('Trade failed:', error);
-      toast.error(`Trade failed: ${error.message}`);
     },
   });
 

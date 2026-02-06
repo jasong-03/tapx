@@ -30,7 +30,7 @@ export const BottomNav = React.memo(function BottomNav({
 
   return (
     <nav className="fixed bottom-0 left-0 right-0 bg-slate-900/95 backdrop-blur-sm border-t border-slate-800 safe-area-pb z-50">
-      <div className="max-w-md mx-auto flex justify-around py-2">
+      <div className="mx-auto flex justify-around py-2 max-w-lg">
         {navItems.map((item) => (
           <button
             key={item.view}

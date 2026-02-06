@@ -70,7 +70,7 @@ async function fetchPoolMarketData(
 }
 
 /**
- * Hook to fetch market data for all SwipeBook pools
+ * Hook to fetch market data for all SwipeBook pools using raw devInspect.
  */
 export function useSwipeBookPools() {
   const client = useCurrentClient() as SuiJsonRpcClient;
@@ -78,7 +78,7 @@ export function useSwipeBookPools() {
 
   const results = useQueries({
     queries: pools.map((pool) => ({
-      queryKey: ['pool-market-data', pool.address],
+      queryKey: ['pool-market-data', pool.poolKey],
       queryFn: () => fetchPoolMarketData(client, pool),
       enabled: !!client,
       refetchInterval: 10000,
