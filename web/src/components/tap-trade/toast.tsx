@@ -11,30 +11,37 @@ interface ToastProps {
 export function Toast({ message, type, onClose }: ToastProps) {
   const [isVisible, setIsVisible] = useState(true)
 
+  const duration = type === "success" ? 3500 : 2500
+
   useEffect(() => {
     const timer = setTimeout(() => {
       setIsVisible(false)
       setTimeout(onClose, 300)
-    }, 2500)
+    }, duration)
 
     return () => clearTimeout(timer)
-  }, [onClose])
+  }, [onClose, duration])
 
-  const bgColor = {
-    error: "bg-red-500/90",
-    success: "bg-neon-lime/90",
-    info: "bg-neon-pink/90",
+  const styles = {
+    error: "bg-red-500/95 text-white border-red-400/30",
+    success: "bg-emerald-500/95 text-white border-emerald-400/30",
+    info: "bg-sky-500/95 text-white border-sky-400/30",
   }[type]
 
-  const textColor = type === "success" ? "text-black" : "text-white"
+  const icon = {
+    error: "\u2717",
+    success: "\u2713",
+    info: "\u2139",
+  }[type]
 
   return (
     <div
-      className={`fixed top-4 left-1/2 -translate-x-1/2 px-4 py-2 rounded-lg ${bgColor} ${textColor} text-sm font-medium shadow-lg transition-all duration-300 z-50 ${
-        isVisible ? "opacity-100 translate-y-0" : "opacity-0 -translate-y-2"
+      className={`fixed top-4 left-1/2 -translate-x-1/2 flex items-center gap-2 px-4 py-2.5 rounded-xl ${styles} border text-sm font-semibold shadow-2xl backdrop-blur-sm transition-all duration-300 z-50 max-w-[90vw] ${
+        isVisible ? "opacity-100 translate-y-0 scale-100" : "opacity-0 -translate-y-2 scale-95"
       }`}
     >
-      {message}
+      <span className="text-base leading-none">{icon}</span>
+      <span className="truncate">{message}</span>
     </div>
   )
 }

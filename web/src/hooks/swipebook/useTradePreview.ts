@@ -5,12 +5,11 @@ import { bcs } from '@mysten/sui/bcs';
 import type { SuiJsonRpcClient } from '@mysten/sui/jsonRpc';
 import type { Pool, TradeIntent, TradePreview, TradeSide } from '@/lib/swipebook/types';
 import { toOnChainAmount, fromOnChainAmount } from '@/lib/deepbook/transactions';
-
-const DEEPBOOK_PACKAGE_ID = '0x2c8d603bc51326b8c13cef9dd07031a408a48dddb541963c8e04b1a1af5f7cf3';
-const DUMMY_SENDER = '0x44e12ed495a913b594b5b73c5358b6a6516d4e3742f7a0dcdec12053b6b0aced';
+import { DEEPBOOK_PACKAGE_ID, DUMMY_SENDER } from '@/lib/deepbook/config';
 
 /**
  * Hook to calculate trade preview (estimated output, price impact, fees)
+ * using raw devInspect calls to the DeepBook pool contract.
  */
 export function useTradePreview(
   pool: Pool | null,
@@ -21,7 +20,7 @@ export function useTradePreview(
   const client = useCurrentClient() as SuiJsonRpcClient;
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ['trade-preview', pool?.address, side, amount],
+    queryKey: ['trade-preview', pool?.poolKey, side, amount],
     queryFn: async (): Promise<TradePreview | null> => {
       if (!pool || !side || amount <= 0) return null;
 
@@ -80,7 +79,7 @@ export function useTradePreview(
       const minReceived = estimatedOutput * (1 - slippageTolerance / 100);
 
       // Price impact (simplified - would need mid price for accurate calculation)
-      const priceImpact = 0; // Would calculate from mid price
+      const priceImpact = 0;
 
       // Trading fee (DeepBook typically 0.1% maker, varies for taker)
       const estimatedFee = amount * 0.001;

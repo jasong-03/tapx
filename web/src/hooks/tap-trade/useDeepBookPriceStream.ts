@@ -52,7 +52,7 @@ export function useDeepBookPriceStream(
   const [currentPrice, setCurrentPrice] = useState<number | null>(null)
   const [isConnected, setIsConnected] = useState(false)
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const poolAddrRef = useRef<string | null>(null)
+  const poolKeyRef = useRef<string | null>(null)
 
   const poll = useCallback(async () => {
     if (!client || !pool) return
@@ -73,14 +73,13 @@ export function useDeepBookPriceStream(
       }
     } catch (err) {
       console.error("[DeepBookPriceStream] poll error:", err)
-      // Don't set disconnected on a single error, only after repeated failures
     }
   }, [client, pool])
 
   useEffect(() => {
     // Reset when pool changes
-    if (pool?.address !== poolAddrRef.current) {
-      poolAddrRef.current = pool?.address ?? null
+    if (pool?.poolKey !== poolKeyRef.current) {
+      poolKeyRef.current = pool?.poolKey ?? null
       setPriceHistory([])
       setCurrentPrice(null)
       setIsConnected(false)

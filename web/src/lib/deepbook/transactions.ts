@@ -1,105 +1,83 @@
-import { Transaction, coinWithBalance } from '@mysten/sui/transactions';
-import type { Pool } from '@/lib/swipebook/types';
-import { DEEPBOOK_PACKAGE_ID } from '@/lib/deepbook/config';
+import { Transaction } from '@mysten/sui/transactions';
+import type { DeepBookClient } from '@mysten/deepbook-v3';
 
 /**
  * Build a market buy transaction (swap quote for base)
- * User provides quote amount, receives base tokens
+ * User provides quote amount, receives base tokens.
+ * The SDK handles DEEP fees, coin splitting, and correct function signatures.
  */
-export function buildMarketBuyTransaction(params: {
-  pool: Pool;
-  quoteAmount: bigint;      // Amount of quote to spend
-  minBaseOut: bigint;       // Minimum base to receive (slippage protection)
-  sender: string;
-}): Transaction {
-  const { pool, quoteAmount, minBaseOut, sender } = params;
-
+export function buildMarketBuyTransaction(
+  dbClient: DeepBookClient,
+  params: {
+    poolKey: string;
+    quoteAmount: number; // human-readable
+    minBaseOut: number; // human-readable
+    sender: string;
+  },
+): Transaction {
   const tx = new Transaction();
-  tx.setSenderIfNotSet(sender);
+  tx.setSenderIfNotSet(params.sender);
 
-  // Create quote coin to spend
-  const quoteCoin = coinWithBalance({
-    type: pool.quoteType,
-    balance: quoteAmount,
-  });
+  const [base, quote, deep] = dbClient.deepBook.swapExactQuoteForBase({
+    poolKey: params.poolKey,
+    amount: params.quoteAmount,
+    deepAmount: 0.5,
+    minOut: params.minBaseOut,
+  })(tx);
 
-  // Call DeepBook swap function - swap quote for base
-  const [baseCoinOut, quoteCoinRemainder] = tx.moveCall({
-    target: `${DEEPBOOK_PACKAGE_ID}::pool::swap_exact_quote_for_base`,
-    typeArguments: [pool.baseType, pool.quoteType],
-    arguments: [
-      tx.object(pool.address),        // Pool
-      tx.object(quoteCoin),           // Quote coin input
-      tx.pure.u64(minBaseOut),        // Min base out
-      tx.object('0x6'),               // Clock
-    ],
-  });
-
-  // Transfer outputs to sender
-  tx.transferObjects([baseCoinOut, quoteCoinRemainder], sender);
-
+  tx.transferObjects([base, quote, deep], params.sender);
   return tx;
 }
 
 /**
  * Build a market sell transaction (swap base for quote)
- * User provides base amount, receives quote tokens
+ * User provides base amount, receives quote tokens.
+ * The SDK handles DEEP fees, coin splitting, and correct function signatures.
  */
-export function buildMarketSellTransaction(params: {
-  pool: Pool;
-  baseAmount: bigint;       // Amount of base to sell
-  minQuoteOut: bigint;      // Minimum quote to receive (slippage protection)
-  sender: string;
-}): Transaction {
-  const { pool, baseAmount, minQuoteOut, sender } = params;
-
+export function buildMarketSellTransaction(
+  dbClient: DeepBookClient,
+  params: {
+    poolKey: string;
+    baseAmount: number; // human-readable
+    minQuoteOut: number; // human-readable
+    sender: string;
+  },
+): Transaction {
   const tx = new Transaction();
-  tx.setSenderIfNotSet(sender);
+  tx.setSenderIfNotSet(params.sender);
 
-  // Create base coin to sell
-  const baseCoin = coinWithBalance({
-    type: pool.baseType,
-    balance: baseAmount,
-  });
+  const [base, quote, deep] = dbClient.deepBook.swapExactBaseForQuote({
+    poolKey: params.poolKey,
+    amount: params.baseAmount,
+    deepAmount: 0.5,
+    minOut: params.minQuoteOut,
+  })(tx);
 
-  // Call DeepBook swap function - swap base for quote
-  const [baseCoinRemainder, quoteCoinOut] = tx.moveCall({
-    target: `${DEEPBOOK_PACKAGE_ID}::pool::swap_exact_base_for_quote`,
-    typeArguments: [pool.baseType, pool.quoteType],
-    arguments: [
-      tx.object(pool.address),        // Pool
-      tx.object(baseCoin),            // Base coin input
-      tx.pure.u64(minQuoteOut),       // Min quote out
-      tx.object('0x6'),               // Clock
-    ],
-  });
-
-  // Transfer outputs to sender
-  tx.transferObjects([baseCoinRemainder, quoteCoinOut], sender);
-
+  tx.transferObjects([base, quote, deep], params.sender);
   return tx;
 }
 
 /**
- * Calculate minimum output with slippage tolerance
+ * Calculate minimum output with slippage tolerance (human-readable numbers)
  */
 export function calculateMinOutput(
-  estimatedOutput: bigint,
-  slippagePercent: number
-): bigint {
-  const slippageFactor = BigInt(Math.floor((100 - slippagePercent) * 100));
-  return (estimatedOutput * slippageFactor) / BigInt(10000);
+  estimatedOutput: number,
+  slippagePercent: number,
+): number {
+  return estimatedOutput * (1 - slippagePercent / 100);
 }
 
 /**
- * Convert human-readable amount to on-chain amount
+ * Convert a human-readable amount to on-chain representation.
+ * Used by devInspect queries that need raw u64 amounts.
  */
 export function toOnChainAmount(amount: number, decimals: number): bigint {
-  return BigInt(Math.floor(amount * Math.pow(10, decimals)));
+  return BigInt(Math.round(amount * Math.pow(10, decimals)));
 }
 
 /**
- * Convert on-chain amount to human-readable amount
+ * Convert an on-chain u64 amount to human-readable.
+ * Used by devInspect queries that return raw u64 amounts.
  */
 export function fromOnChainAmount(amount: bigint, decimals: number): number {
   return Number(amount) / Math.pow(10, decimals);

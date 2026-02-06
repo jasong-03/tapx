@@ -1,23 +1,23 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { useCurrentAccount, useDAppKit, useCurrentClient } from '@mysten/dapp-kit-react';
+import { useCurrentAccount, useDAppKit } from '@mysten/dapp-kit-react';
 import { toast } from 'sonner';
-import type { SuiJsonRpcClient } from '@mysten/sui/jsonRpc';
 import type { Pool } from '@/lib/swipebook/types';
-import type { OrderSide, BundledOrderParams, LimitOrderParams } from '@/lib/deepbook/orderTypes';
-import { toOnChainPrice, validateBundledOrderPrices } from '@/lib/deepbook/orderTypes';
+import type { OrderSide } from '@/lib/deepbook/orderTypes';
+import { validateBundledOrderPrices } from '@/lib/deepbook/orderTypes';
 import {
   buildLimitOrderTransaction,
   buildBundledOrderTransaction,
   buildCancelOrderTransaction,
   buildCancelAllOrdersTransaction,
 } from '@/lib/deepbook/advancedOrders';
-import { toOnChainAmount } from '@/lib/deepbook/transactions';
+import { useDeepBookClient } from './swipebook/useDeepBookClient';
 
 interface PlaceLimitOrderParams {
   pool: Pool;
   side: OrderSide;
   price: number;
   quantity: number;
+  balanceManagerKey: string;
   expiration?: number;
 }
 
@@ -26,6 +26,7 @@ interface PlaceBundledOrderParams {
   side: OrderSide;
   entryPrice: number;
   quantity: number;
+  balanceManagerKey: string;
   stopLossPrice?: number;
   takeProfitPrice?: number;
 }
@@ -33,6 +34,7 @@ interface PlaceBundledOrderParams {
 interface CancelOrderParams {
   pool: Pool;
   orderId: string;
+  balanceManagerKey: string;
 }
 
 interface OrderResult {
@@ -43,51 +45,34 @@ interface OrderResult {
 }
 
 /**
- * Hook for placing and managing advanced orders on DeepBook
+ * Hook for placing and managing advanced orders on DeepBook using the SDK.
  */
 export function useAdvancedOrders() {
   const currentAccount = useCurrentAccount();
   const dAppKit = useDAppKit();
-  const suiClient = useCurrentClient();
   const queryClient = useQueryClient();
+  const dbClient = useDeepBookClient();
 
   // Place limit order mutation
   const limitOrderMutation = useMutation({
     mutationFn: async (params: PlaceLimitOrderParams): Promise<OrderResult> => {
-      if (!currentAccount) {
-        throw new Error('Wallet not connected');
-      }
+      if (!currentAccount) throw new Error('Wallet not connected');
+      if (!dbClient) throw new Error('DeepBook client not initialized');
 
-      const { pool, side, price, quantity, expiration } = params;
-
-      // Convert to on-chain values
-      const onChainPrice = toOnChainPrice(price, pool.baseDecimals, pool.quoteDecimals);
-      const onChainQuantity = toOnChainAmount(quantity, pool.baseDecimals);
-
-      const orderParams: LimitOrderParams & { sender: string } = {
-        pool,
-        side,
-        price: onChainPrice,
-        quantity: onChainQuantity,
-        expiration,
+      const tx = buildLimitOrderTransaction(dbClient, {
+        pool: params.pool,
+        side: params.side,
+        price: BigInt(Math.floor(params.price * 1e9)),
+        quantity: BigInt(Math.floor(params.quantity * Math.pow(10, params.pool.baseDecimals))),
+        balanceManagerKey: params.balanceManagerKey,
+        expiration: params.expiration,
         sender: currentAccount.address,
-      };
+      });
 
-      const tx = buildLimitOrderTransaction(orderParams);
       const result = await dAppKit.signAndExecuteTransaction({ transaction: tx });
+      const digest = 'digest' in result ? (result as { digest: string }).digest : 'unknown';
 
-      const digest =
-        'digest' in result
-          ? (result as { digest: string }).digest
-          : 'Transaction' in result
-            ? 'pending'
-            : 'unknown';
-
-      return {
-        success: true,
-        digest,
-        timestamp: Date.now(),
-      };
+      return { success: true, digest, timestamp: Date.now() };
     },
     onSuccess: (result) => {
       toast.success(`Limit order placed! TX: ${result.digest?.slice(0, 8)}...`);
@@ -103,57 +88,35 @@ export function useAdvancedOrders() {
   // Place bundled order mutation (entry + SL + TP)
   const bundledOrderMutation = useMutation({
     mutationFn: async (params: PlaceBundledOrderParams): Promise<OrderResult> => {
-      if (!currentAccount) {
-        throw new Error('Wallet not connected');
-      }
+      if (!currentAccount) throw new Error('Wallet not connected');
+      if (!dbClient) throw new Error('DeepBook client not initialized');
 
-      if (!suiClient) {
-        throw new Error('Sui client not available');
-      }
-
-      const { pool, side, entryPrice, quantity, stopLossPrice, takeProfitPrice } = params;
-
-      // Convert to on-chain values
-      const onChainEntryPrice = toOnChainPrice(entryPrice, pool.baseDecimals, pool.quoteDecimals);
-      const onChainQuantity = toOnChainAmount(quantity, pool.baseDecimals);
-      const onChainStopLoss = stopLossPrice
-        ? toOnChainPrice(stopLossPrice, pool.baseDecimals, pool.quoteDecimals)
-        : undefined;
-      const onChainTakeProfit = takeProfitPrice
-        ? toOnChainPrice(takeProfitPrice, pool.baseDecimals, pool.quoteDecimals)
-        : undefined;
-
-      const bundledParams: BundledOrderParams = {
-        pool,
-        side,
-        entryPrice: onChainEntryPrice,
-        quantity: onChainQuantity,
-        stopLossPrice: onChainStopLoss,
-        takeProfitPrice: onChainTakeProfit,
+      const bundledParams = {
+        pool: params.pool,
+        side: params.side,
+        entryPrice: BigInt(Math.floor(params.entryPrice * 1e9)),
+        quantity: BigInt(Math.floor(params.quantity * Math.pow(10, params.pool.baseDecimals))),
+        stopLossPrice: params.stopLossPrice
+          ? BigInt(Math.floor(params.stopLossPrice * 1e9))
+          : undefined,
+        takeProfitPrice: params.takeProfitPrice
+          ? BigInt(Math.floor(params.takeProfitPrice * 1e9))
+          : undefined,
         sender: currentAccount.address,
       };
 
-      // Validate prices before building transaction
       const validation = validateBundledOrderPrices(bundledParams);
-      if (!validation.valid) {
-        throw new Error(validation.error);
-      }
+      if (!validation.valid) throw new Error(validation.error);
 
-      const tx = await buildBundledOrderTransaction(suiClient as SuiJsonRpcClient, bundledParams);
+      const tx = buildBundledOrderTransaction(dbClient, {
+        ...bundledParams,
+        balanceManagerKey: params.balanceManagerKey,
+      });
+
       const result = await dAppKit.signAndExecuteTransaction({ transaction: tx });
+      const digest = 'digest' in result ? (result as { digest: string }).digest : 'unknown';
 
-      const digest =
-        'digest' in result
-          ? (result as { digest: string }).digest
-          : 'Transaction' in result
-            ? 'pending'
-            : 'unknown';
-
-      return {
-        success: true,
-        digest,
-        timestamp: Date.now(),
-      };
+      return { success: true, digest, timestamp: Date.now() };
     },
     onSuccess: (result) => {
       toast.success(`Bundled orders placed! TX: ${result.digest?.slice(0, 8)}...`);
@@ -169,34 +132,20 @@ export function useAdvancedOrders() {
   // Cancel order mutation
   const cancelOrderMutation = useMutation({
     mutationFn: async (params: CancelOrderParams): Promise<OrderResult> => {
-      if (!currentAccount) {
-        throw new Error('Wallet not connected');
-      }
+      if (!currentAccount) throw new Error('Wallet not connected');
+      if (!dbClient) throw new Error('DeepBook client not initialized');
 
-      const { pool, orderId } = params;
-
-      const tx = buildCancelOrderTransaction({
-        poolAddress: pool.address,
-        baseType: pool.baseType,
-        quoteType: pool.quoteType,
-        orderId,
+      const tx = buildCancelOrderTransaction(dbClient, {
+        poolKey: params.pool.poolKey,
+        balanceManagerKey: params.balanceManagerKey,
+        orderId: params.orderId,
         sender: currentAccount.address,
       });
 
       const result = await dAppKit.signAndExecuteTransaction({ transaction: tx });
+      const digest = 'digest' in result ? (result as { digest: string }).digest : 'unknown';
 
-      const digest =
-        'digest' in result
-          ? (result as { digest: string }).digest
-          : 'Transaction' in result
-            ? 'pending'
-            : 'unknown';
-
-      return {
-        success: true,
-        digest,
-        timestamp: Date.now(),
-      };
+      return { success: true, digest, timestamp: Date.now() };
     },
     onSuccess: (result) => {
       toast.success(`Order cancelled! TX: ${result.digest?.slice(0, 8)}...`);
@@ -211,32 +160,20 @@ export function useAdvancedOrders() {
 
   // Cancel all orders mutation
   const cancelAllOrdersMutation = useMutation({
-    mutationFn: async (pool: Pool): Promise<OrderResult> => {
-      if (!currentAccount) {
-        throw new Error('Wallet not connected');
-      }
+    mutationFn: async (params: { pool: Pool; balanceManagerKey: string }): Promise<OrderResult> => {
+      if (!currentAccount) throw new Error('Wallet not connected');
+      if (!dbClient) throw new Error('DeepBook client not initialized');
 
-      const tx = buildCancelAllOrdersTransaction({
-        poolAddress: pool.address,
-        baseType: pool.baseType,
-        quoteType: pool.quoteType,
+      const tx = buildCancelAllOrdersTransaction(dbClient, {
+        poolKey: params.pool.poolKey,
+        balanceManagerKey: params.balanceManagerKey,
         sender: currentAccount.address,
       });
 
       const result = await dAppKit.signAndExecuteTransaction({ transaction: tx });
+      const digest = 'digest' in result ? (result as { digest: string }).digest : 'unknown';
 
-      const digest =
-        'digest' in result
-          ? (result as { digest: string }).digest
-          : 'Transaction' in result
-            ? 'pending'
-            : 'unknown';
-
-      return {
-        success: true,
-        digest,
-        timestamp: Date.now(),
-      };
+      return { success: true, digest, timestamp: Date.now() };
     },
     onSuccess: (result) => {
       toast.success(`All orders cancelled! TX: ${result.digest?.slice(0, 8)}...`);
@@ -250,38 +187,32 @@ export function useAdvancedOrders() {
   });
 
   return {
-    // Limit orders
     placeLimitOrder: limitOrderMutation.mutate,
     placeLimitOrderAsync: limitOrderMutation.mutateAsync,
     isPlacingLimitOrder: limitOrderMutation.isPending,
     limitOrderError: limitOrderMutation.error,
 
-    // Bundled orders (entry + SL + TP)
     placeBundledOrder: bundledOrderMutation.mutate,
     placeBundledOrderAsync: bundledOrderMutation.mutateAsync,
     isPlacingBundledOrder: bundledOrderMutation.isPending,
     bundledOrderError: bundledOrderMutation.error,
 
-    // Cancel orders
     cancelOrder: cancelOrderMutation.mutate,
     cancelOrderAsync: cancelOrderMutation.mutateAsync,
     isCancellingOrder: cancelOrderMutation.isPending,
     cancelOrderError: cancelOrderMutation.error,
 
-    // Cancel all orders
     cancelAllOrders: cancelAllOrdersMutation.mutate,
     cancelAllOrdersAsync: cancelAllOrdersMutation.mutateAsync,
     isCancellingAllOrders: cancelAllOrdersMutation.isPending,
     cancelAllOrdersError: cancelAllOrdersMutation.error,
 
-    // Combined pending state
     isPending:
       limitOrderMutation.isPending ||
       bundledOrderMutation.isPending ||
       cancelOrderMutation.isPending ||
       cancelAllOrdersMutation.isPending,
 
-    // Reset all mutations
     reset: () => {
       limitOrderMutation.reset();
       bundledOrderMutation.reset();
