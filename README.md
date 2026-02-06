@@ -1,216 +1,134 @@
-# DeepMaker / SwipeBook
+# TapX
 
-**Decentralized vaults for market-making on [DeepBook](https://deepbook.tech/) with a swipe-to-trade interface.**
+**Tap a price grid, execute real DeFi trades on Sui.**
 
-DeepMaker provides automated market-making infrastructure for Sui's native CLOB, while SwipeBook offers a gamified trading experience - swipe right to buy, left to sell.
+TapX is a mobile-first trading interface built on DeepBook (Sui's native order book). Instead of complex order forms, users tap cells on an interactive price grid to instantly execute on-chain market orders.
 
 ## Key Features
 
-### SwipeBook Trading Interface
-- **Swipe-to-Trade**: Intuitive mobile-first UX inspired by dating apps
-- **AI Trading Signals**: RSI, MACD, and EMA-based buy/sell recommendations
-- **Risk Assessment**: Real-time pool risk scoring based on volatility and liquidity
-- **Gamification**: XP, levels, achievements, streaks, and leaderboards
-- **Social Features**: Whale alerts, community consensus, and watchlists
+### Tap-to-Trade Interface
+- **Interactive Price Grid**: Real-time canvas chart with tap-to-trade cells
+- **Instant Execution**: Tap above price to buy, below to sell
+- **Zoom Controls**: 1x-20x resolution for precise price targeting
+- **Smooth Animations**: Catmull-Rom spline interpolation at 60fps
 
-### DeepMaker AMM Vaults
-- **Pooled Liquidity**: Deposit token pairs to earn from market-making spreads
-- **LP Tokens (DRIP)**: Proportional representation of vault share
-- **Automated Spread Orders**: Dynamic bid/ask placement on DeepBook
-- **Pyth Oracle Integration**: Accurate pricing for deposits and withdrawals
-- **Portfolio Rebalancing**: Automatic order skewing to maintain balance
+### DeepBook Integration
+- **On-chain Order Book**: Direct swaps on Sui's native CLOB
+- **Real-time Prices**: 3-second polling with visual interpolation
+- **Multiple Pairs**: SUI/USDC, DEEP/USDC, WAL/USDC, NS/USDC, and more
+- **Wallet Balance**: Live balance display from connected wallet
+
+### Gamification
+- **XP System**: Earn experience points per trade
+- **Streaks**: Daily trading streak tracking
+- **Leaderboard**: Compete with other traders
+- **Achievements**: Unlock badges for milestones
 
 ## Tech Stack
 
 | Layer | Technologies |
 |-------|--------------|
-| **Frontend** | Next.js 15, React 19, TypeScript, TailwindCSS, Framer Motion |
-| **Blockchain** | Sui Move, DeepBook V3, Pyth Oracle |
-| **Wallet** | @mysten/dapp-kit-react, Sui Wallet |
+| **Frontend** | Next.js 15, React 19, TypeScript, TailwindCSS, Canvas API |
+| **Blockchain** | Sui Move, DeepBook V3 |
+| **Wallet** | @mysten/dapp-kit-react |
 | **Data** | TanStack Query, React Context |
-| **Engine** | Node.js, @mysten/sui SDK |
-
-## Prerequisites
-
-- Node.js 20+
-- npm or yarn
-- Sui Wallet browser extension
-- Sui CLI (for contract deployment)
 
 ## Quick Start
 
 ### 1. Clone and Install
 
 ```bash
-git clone https://github.com/your-org/swipe-trading-.git
-cd swipe-trading-
+git clone https://github.com/jasong-03/tapx.git
+cd tapx
 
-# Install frontend dependencies
+# Install dependencies
 cd web && npm install
-
-# Install engine dependencies
-cd ../engine && npm install
 ```
 
 ### 2. Configure Environment
 
-**Frontend** (`web/.env.local`):
+Create `web/.env.local`:
 ```bash
-NEXT_PUBLIC_AMM_PACKAGE_ID=<deployed package ID>
-NEXT_PUBLIC_PRICE_ID_SUI_USD=<Pyth SUI/USD feed ID>
-NEXT_PUBLIC_PRICE_ID_DEEP_USD=<Pyth DEEP/USD feed ID>
+NEXT_PUBLIC_SUI_NETWORK=mainnet
 ```
 
-**Engine** (`engine/.env.local`):
-```bash
-RPC_URL=https://fullnode.mainnet.sui.io
-AMM_PACKAGE_ID=<deployed package ID>
-TRADE_CAP_ID=<TradingCap object ID>
-POOL_ID=<DeepBook pool ID>
-PRIVATE_KEY=<operator wallet key>
-SPREAD_BPS=1000
-ORDER_SIZE=100
-INTERVAL_MS=10000
-```
-
-### 3. Run Development Servers
+### 3. Run Development Server
 
 ```bash
-# Terminal 1: Frontend
 cd web && npm run dev
-# Open http://localhost:3000
-
-# Terminal 2: Trading Engine (optional)
-cd engine && npm run dev
-```
-
-### 4. Deploy Contracts (if needed)
-
-```bash
-cd packages/amm
-sui move build
-sui client publish --gas-budget 100000000
-
-cd ../token
-sui move build
-sui client publish --gas-budget 100000000
+# Open http://localhost:3000/swipebook
 ```
 
 ## Project Structure
 
 ```
-swipe-trading-/
-|-- engine/                 # Market maker bot (TypeScript)
-|   |-- src/
-|   |   |-- index.ts       # Entry point
-|   |   |-- marketMaker.ts # Core trading logic
-|   |   |-- config.ts      # Environment config
-|   |   +-- types.ts       # Type definitions
-|
-|-- packages/               # Sui Move smart contracts
-|   |-- amm/               # AMM vault contract
-|   |   +-- sources/vault.move
-|   +-- token/             # DRIP LP token
-|       +-- sources/drip.move
-|
-|-- web/                    # Next.js frontend
-|   +-- src/
-|       |-- app/           # App Router pages
-|       |   |-- page.tsx           # Vault management
-|       |   +-- swipebook/         # Trading interface
-|       |-- components/    # React components
-|       |-- hooks/         # Custom hooks (signals, risk, gamification)
-|       |-- context/       # State management
-|       +-- lib/           # Utilities and types
-|
-+-- docs/                   # Documentation
+tapx/
+├── engine/                 # Market maker bot (optional)
+│   └── src/
+│       ├── index.ts
+│       ├── marketMaker.ts
+│       └── config.ts
+│
+├── packages/               # Sui Move contracts
+│   ├── amm/               # AMM vault contract
+│   └── token/             # DRIP LP token
+│
+└── web/                    # Next.js frontend
+    └── src/
+        ├── app/
+        │   └── swipebook/  # Main trading interface
+        ├── components/
+        │   ├── tap-trade/  # Canvas chart, controls
+        │   └── swipebook/  # Portfolio, history
+        ├── hooks/
+        │   ├── tap-trade/  # Price stream
+        │   └── swipebook/  # Trade execution
+        └── lib/
+            └── deepbook/   # Pool configs, transactions
 ```
 
-## Documentation
+## How It Works
 
-| Document | Description |
-|----------|-------------|
-| [Product Overview](./docs/project-overview-prd.md) | Vision, features, roadmap, success metrics |
-| [Codebase Summary](./docs/codebase-summary.md) | Architecture, directory structure, data flows |
-| [Code Standards](./docs/code-standards.md) | Conventions for TypeScript, Move, React |
-| [System Architecture](./docs/system-architecture.md) | Technical architecture, integrations, deployment |
+1. **Connect Wallet**: Click "Connect Wallet" to link your Sui wallet
+2. **Select Pool**: Choose trading pair from dropdown (SUI/USDC default)
+3. **Set Stake**: Pick trade size (1, 5, or 10 USDC)
+4. **Tap to Trade**:
+   - Tap cell **above** current price → **BUY** (quote → base)
+   - Tap cell **below** current price → **SELL** (base → quote)
+5. **Confirm**: Sign transaction in wallet popup
+6. **Done**: Trade executes on DeepBook, balance updates
 
-## Supported Trading Pairs
+## Supported Pools
 
-The engine supports 16+ DeepBook mainnet pools:
+| Pool | Base | Quote |
+|------|------|-------|
+| SUI/USDC | SUI | USDC |
+| DEEP/USDC | DEEP | USDC |
+| DEEP/SUI | DEEP | SUI |
+| WAL/USDC | WAL | USDC |
+| WAL/SUI | WAL | SUI |
+| NS/USDC | NS | USDC |
+| NS/SUI | NS | SUI |
 
-| Pool | Address |
-|------|---------|
-| DEEP/SUI | `0xb663...fc22` |
-| SUI/USDC | `0xe05d...4407` |
-| DEEP/USDC | `0xf948...95ce` |
-| WAL/SUI | `0x81f5...d08b` |
-| NS/USDC | `0x0c0f...e060` |
-
-See `engine/src/types.ts` for complete pool registry.
-
-## Smart Contract Functions
-
-### AMM Vault (`packages/amm`)
-
-| Function | Description |
-|----------|-------------|
-| `create_vault` | Initialize new vault with LP treasury cap |
-| `deposit` | Add liquidity, receive DRIP tokens |
-| `withdraw` | Burn DRIP tokens, receive assets |
-| `create_spread_order` | Place bid/ask orders on DeepBook |
-| `generate_trade_proof` | Authorize trading operations |
-
-### DRIP Token (`packages/token`)
-
-| Property | Value |
-|----------|-------|
-| Symbol | DRIP |
-| Decimals | 9 |
-| Supply | Elastic (minted on deposit, burned on withdrawal) |
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch: `git checkout -b feature/my-feature`
-3. Make your changes following our [code standards](./docs/code-standards.md)
-4. Write/update tests as needed
-5. Submit a pull request
-
-### Development Commands
+## Development
 
 ```bash
-# Frontend
-cd web
-npm run dev          # Start development server
-npm run build        # Production build
-npm run lint         # Run ESLint
-npm run typecheck    # TypeScript check
+# Start dev server
+cd web && npm run dev
 
-# Engine
-cd engine
-npm run dev          # Start with hot reload
-npm run build        # Compile TypeScript
-npm run start        # Run compiled JS
+# Build for production
+npm run build
 
-# Contracts
-cd packages/amm
-sui move build       # Compile Move
-sui move test        # Run tests
+# Type check
+npm run typecheck
+
+# Lint
+npm run lint
 ```
-
-## Security
-
-- Smart contracts use capability-based access control
-- All transactions require wallet signature approval
-- No private keys stored in frontend
-- Oracle prices validated for staleness (max 60s)
-
-For security concerns, please open a private issue or contact the team directly.
 
 ## License
 
-MIT License - see [LICENSE](./LICENSE) for details.
+MIT License
 
 ---
 
