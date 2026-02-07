@@ -2,7 +2,7 @@
 
 import dynamic from "next/dynamic";
 
-const LandingPage = dynamic(() => import("@/components/landing/LandingPage"), {
+const HomeContent = dynamic(() => import("@/components/home-content"), {
   ssr: false,
   loading: () => (
     <div className="w-screen h-screen flex items-center justify-center">
@@ -11,6 +11,6 @@ const LandingPage = dynamic(() => import("@/components/landing/LandingPage"), {
   ),
 });
 
-export default function Home() {
-  return <LandingPage />;
+export default function VaultPage() {
+  return <HomeContent />;
 }

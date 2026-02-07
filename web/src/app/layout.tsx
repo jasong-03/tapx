@@ -16,8 +16,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "DeepMaker",
-  description: "Decentralized DeepBook AMM",
+  title: "TapX - Tap. Trade. Earn.",
+  description: "Mobile-first DeFi trading on Sui. Swipe tokens, trade with leverage, and compete on the leaderboard — powered by DeepBook V3.",
 };
 
 export default function RootLayout({
