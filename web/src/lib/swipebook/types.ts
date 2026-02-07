@@ -65,6 +65,7 @@ export interface TradeResult {
   executedQuantity?: number;
   fee?: number;
   timestamp: number;
+  isSimulated?: boolean;
 }
 
 // Portfolio types

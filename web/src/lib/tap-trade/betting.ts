@@ -52,3 +52,33 @@ export function checkBetWin(bet: Bet, price: number, currentTime: number = Date.
 export function isBetExpired(bet: Bet): boolean {
   return Date.now() >= bet.expiresAt
 }
+
+export interface MarginBet extends Bet {
+  direction: 'long' | 'short';
+  leverage: number;
+  targetPrice: number;
+  orderId?: string;
+  fillStatus: 'pending' | 'filled' | 'cancelled';
+}
+
+export function createMarginBet(
+  stake: number,
+  multiplier: number,
+  priceMin: number,
+  priceMax: number,
+  expiresAt: number,
+  betStartTime: number,
+  row: number,
+  col: number,
+  direction: 'long' | 'short',
+  leverage: number,
+  targetPrice: number,
+): MarginBet {
+  return {
+    ...createBet(stake, multiplier, priceMin, priceMax, expiresAt, betStartTime, row, col),
+    direction,
+    leverage,
+    targetPrice,
+    fillStatus: 'pending',
+  };
+}

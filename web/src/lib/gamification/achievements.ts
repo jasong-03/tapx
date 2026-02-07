@@ -199,6 +199,69 @@ export const ACHIEVEMENTS: Achievement[] = [
       },
     },
   },
+
+  // Margin trading achievements
+  {
+    id: 'first_leverage',
+    name: 'Leveraged Up',
+    description: 'Open your first leveraged position',
+    icon: 'leverage',
+    trigger: { type: 'margin_trades', count: 1 },
+    reward: { xp: 100 },
+  },
+  {
+    id: 'survive_5x',
+    name: 'Living Dangerously',
+    description: 'Profit on a 5x leveraged trade',
+    icon: 'danger',
+    trigger: { type: 'margin_trades', count: 1 }, // checked with context
+    reward: {
+      xp: 500,
+      badge: { id: 'survive_5x_badge', name: 'Living Dangerously', icon: 'skull', earnedAt: '' },
+    },
+  },
+  {
+    id: 'margin_streak_5',
+    name: 'Margin Machine',
+    description: '5 profitable margin trades in a row',
+    icon: 'streak',
+    trigger: { type: 'margin_streak', count: 5 },
+    reward: {
+      xp: 300,
+      badge: { id: 'margin_streak_5_badge', name: 'Margin Machine', icon: 'machine', earnedAt: '' },
+    },
+  },
+  {
+    id: 'margin_streak_10',
+    name: 'Unstoppable Force',
+    description: '10 profitable margin trades in a row',
+    icon: 'force',
+    trigger: { type: 'margin_streak', count: 10 },
+    reward: {
+      xp: 1000,
+      badge: { id: 'margin_streak_10_badge', name: 'Unstoppable Force', icon: 'thunder', earnedAt: '' },
+    },
+    hidden: true,
+  },
+  {
+    id: 'pnl_100',
+    name: 'Benjamin',
+    description: 'Earn $100+ PnL in a single trade',
+    icon: 'money',
+    trigger: { type: 'margin_pnl', amount: 100 },
+    reward: {
+      xp: 750,
+      badge: { id: 'pnl_100_badge', name: 'Benjamin', icon: 'dollar', earnedAt: '' },
+    },
+  },
+  {
+    id: 'speed_demon',
+    name: 'Speed Demon',
+    description: 'Profit on a 15-second trade',
+    icon: 'speed',
+    trigger: { type: 'margin_trades', count: 1 }, // checked with context
+    reward: { xp: 200 },
+  },
 ];
 
 /**
@@ -210,6 +273,11 @@ export function checkAchievementTrigger(
   additionalContext?: {
     tradesInDay?: number;
     currentProfitStreak?: number;
+    marginTrades?: number;
+    marginWinStreak?: number;
+    bestTradePnL?: number;
+    profitable5xTrades?: number;
+    profitable15sTrades?: number;
   }
 ): boolean {
   const { trigger } = achievement;
@@ -235,6 +303,15 @@ export function checkAchievementTrigger(
         stats.winRate >= trigger.rate
       );
 
+    case 'margin_trades':
+      return (additionalContext?.marginTrades ?? 0) >= trigger.count;
+
+    case 'margin_streak':
+      return (additionalContext?.marginWinStreak ?? 0) >= trigger.count;
+
+    case 'margin_pnl':
+      return (additionalContext?.bestTradePnL ?? 0) >= trigger.amount;
+
     default:
       return false;
   }
@@ -249,6 +326,11 @@ export function getUnlockedAchievements(
   additionalContext?: {
     tradesInDay?: number;
     currentProfitStreak?: number;
+    marginTrades?: number;
+    marginWinStreak?: number;
+    bestTradePnL?: number;
+    profitable5xTrades?: number;
+    profitable15sTrades?: number;
   }
 ): Achievement[] {
   return ACHIEVEMENTS.filter((achievement) => {

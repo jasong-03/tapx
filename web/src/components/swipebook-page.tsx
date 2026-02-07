@@ -15,12 +15,17 @@ import { StakeSelector } from "@/components/tap-trade/stake-selector"
 import { UnifiedChart } from "@/components/tap-trade/unified-chart"
 import { Toast } from "@/components/tap-trade/toast"
 import { TileScaler } from "@/components/tap-trade/tile-scaler"
+import { ModeToggle } from "@/components/tap-trade/ModeToggle"
+import { QuickTradeControls } from "@/components/tap-trade/QuickTradeControls"
+import { RoundHistory } from "@/components/tap-trade/RoundHistory"
+import { ResultReveal } from "@/components/tap-trade/ResultReveal"
 import { useDeepBookPriceStream } from "@/hooks/tap-trade/useDeepBookPriceStream"
 import { useUserBalance } from "@/hooks/useUserBalance"
 import { useTradeExecution } from "@/hooks/swipebook/useTradeExecution"
+import { useMarginManager } from "@/hooks/swipebook/useMarginManager"
+import { useMarginPosition } from "@/hooks/swipebook/useMarginPosition"
 import { getSwipeBookPools } from "@/lib/deepbook/pools"
-import { SUI_NETWORK } from "@/lib/deepbook/config"
-import { COIN_TYPES, TESTNET_COIN_TYPES } from "@/lib/deepbook/pools"
+import { MARGIN_POOL_KEYS } from "@/lib/deepbook/margin-config"
 import type { Pool } from "@/lib/swipebook/types"
 import type { SwipeBookView } from "@/lib/swipebook/types"
 
@@ -40,7 +45,7 @@ function haptic(pattern: number | number[] = 50) {
   }
 }
 
-const STAKES = [1, 5, 10]
+const STAKES = [0.5, 1, 5]
 const ROWS = 14
 const COLS = 12
 const TIME_STEP_MS = 5000
@@ -50,7 +55,15 @@ const DEFAULT_SLIPPAGE = 1 // 1%
 function TapTradeContent() {
   const router = useRouter()
   const currentAccount = useCurrentAccount()
-  const { state, setView } = useSwipeBook()
+  const {
+    state,
+    setView,
+    setPredictionMode,
+    setQuickTradeState,
+    setActivePrediction,
+  } = useSwipeBook()
+
+  const isQuickMode = state.predictionMode === 'quick'
 
   // Pool selection
   const allPools = getSwipeBookPools()
@@ -68,18 +81,24 @@ function TapTradeContent() {
   const baseBalance = baseBalanceData
     ? Number(baseBalanceData.totalBalance) / Math.pow(10, selectedPool.baseDecimals)
     : 0
-  // DEEP balance (needed for swap fees)
-  const deepCoinType = SUI_NETWORK === 'testnet' ? TESTNET_COIN_TYPES.DEEP : COIN_TYPES.DEEP
-  const { data: deepBalanceData } = useUserBalance(deepCoinType)
-  const deepBalance = deepBalanceData
-    ? Number(deepBalanceData.totalBalance) / 1e6  // DEEP has 6 decimals
-    : 0
   const balanceLoading = quoteLoading || baseLoading
 
-  // Phase C: Real trade execution
-  const { executeTradeAsync } = useTradeExecution()
+  // Margin manager (for Quick Trade mode)
+  const { managerId, isCreating, createManager } = useMarginManager()
 
-  const [stake, setStake] = useState(5)
+  // Margin position query (for Quick Trade mode)
+  const { data: marginPosition } = useMarginPosition({
+    managerId,
+    poolKey: selectedPool.poolKey,
+    currentPrice,
+    isLong: state.activePrediction?.direction === 'long',
+    enabled: isQuickMode && !!managerId,
+  })
+
+  // Trade execution hook (Grid mode)
+  const realTrade = useTradeExecution()
+
+  const [stake, setStake] = useState(1)
   const [bets, setBets] = useState<Bet[]>([])
   const [toast, setToast] = useState<{ message: string; type: "error" | "success" | "info" } | null>(null)
   const [zoom, setZoom] = useState(10)
@@ -87,10 +106,20 @@ function TapTradeContent() {
   const betsRef = useRef(bets)
   betsRef.current = bets
 
-  // Zoom-based priceStep: higher zoom = smaller cells = finer Y resolution
+  // Zoom-based priceStep
   const priceStep = currentPrice ? currentPrice * (0.002 / zoom) : 0.01
 
-  // Cleanup old order tiles from chart
+  // Check if current pool supports margin trading
+  const poolSupportsMargin = MARGIN_POOL_KEYS.includes(selectedPool.poolKey as typeof MARGIN_POOL_KEYS[number])
+
+  // Auto-switch to grid if pool doesn't support margin
+  useEffect(() => {
+    if (isQuickMode && !poolSupportsMargin) {
+      setPredictionMode('grid')
+    }
+  }, [selectedPool.poolKey, isQuickMode, poolSupportsMargin, setPredictionMode])
+
+  // Cleanup old order tiles
   useEffect(() => {
     const interval = setInterval(() => {
       const now = Date.now()
@@ -109,6 +138,7 @@ function TapTradeContent() {
     setBets([])
   }, [selectedPool.address])
 
+  // Grid mode cell click handler (real spot swap)
   const handleCellClick = useCallback(
     async (
       row: number,
@@ -120,38 +150,12 @@ function TapTradeContent() {
       multiplier: number,
       absolutePrice: number,
     ) => {
-      // Must be connected
       if (!currentAccount) {
         setToast({ message: "Connect wallet first", type: "error" })
         return
       }
 
       if (!currentPrice) return
-
-      // Determine trade side early so we can validate the right balance
-      const side = absolutePrice >= currentPrice ? "buy" : "sell"
-
-      // Check DEEP balance for swap fees (DeepBook V3 requires DEEP)
-      if (currentAccount && deepBalance < 0.5) {
-        setToast({ message: `Need at least 0.5 DEEP for swap fees (have ${deepBalance.toFixed(2)})`, type: "error" })
-        return
-      }
-
-      // Check balance for the token being spent
-      if (side === "buy") {
-        // BUY base: spending quote tokens
-        if (quoteBalance < stake) {
-          setToast({ message: `Insufficient ${selectedPool.quoteCoin} balance`, type: "error" })
-          return
-        }
-      } else {
-        // SELL base: spending base tokens (need stake/price amount of base)
-        const baseNeeded = stake / currentPrice
-        if (baseBalance < baseNeeded) {
-          setToast({ message: `Insufficient ${selectedPool.baseCoin} balance (need ~${baseNeeded.toFixed(4)}, have ${baseBalance.toFixed(4)})`, type: "error" })
-          return
-        }
-      }
 
       // Prevent duplicate on same cell
       const existingBet = betsRef.current.find(
@@ -165,19 +169,33 @@ function TapTradeContent() {
         return
       }
 
-      // Create visual tile (shows as "open"/executing on chart)
+      const side = absolutePrice >= currentPrice ? "buy" : "sell"
+
+      // Balance checks
+      if (side === "buy" && quoteBalance < stake) {
+        setToast({ message: `Insufficient ${selectedPool.quoteCoin} balance`, type: "error" })
+        return
+      }
+      if (side === "sell") {
+        const baseNeeded = stake / currentPrice
+        if (baseBalance < baseNeeded) {
+          setToast({ message: `Insufficient ${selectedPool.baseCoin} balance`, type: "error" })
+          return
+        }
+      }
+
+      // Create visual tile
       const bet = createBet(stake, multiplier, priceMin, priceMax, expiresAt, betStartTime, row, col)
       setBets((prev) => [...prev, bet])
 
-      // Execute real DeepBook swap
+      // Execute real swap
       try {
-        // BUY: spend `stake` quote to get base. SELL: sell `stake/price` base to get quote.
         const amount = side === "buy" ? stake : stake / currentPrice
         const estimatedOutput = side === "buy" ? stake / currentPrice : stake
 
-        haptic(30) // light tap on submit
+        haptic(30)
 
-        const result = await executeTradeAsync({
+        const result = await realTrade.executeTradeAsync({
           pool: selectedPool,
           side,
           amount,
@@ -185,12 +203,10 @@ function TapTradeContent() {
           slippagePercent: DEFAULT_SLIPPAGE,
         })
 
-        // Mark tile as filled (green + win animation)
         setBets((prev) =>
           prev.map((b) => (b.id === bet.id ? { ...b, status: "won" as const, hitAt: Date.now() } : b)),
         )
 
-        // Celebration!
         fireConfetti()
         haptic([50, 30, 100])
 
@@ -205,13 +221,11 @@ function TapTradeContent() {
           type: "success",
         })
       } catch (err) {
-        // Mark tile as failed (red)
         setBets((prev) =>
           prev.map((b) => (b.id === bet.id ? { ...b, status: "lost" as const } : b)),
         )
         haptic([100, 50, 100])
 
-        // Translate common Move abort errors to user-friendly messages
         const rawMsg = err instanceof Error ? err.message : "Unknown error"
         let userMsg = rawMsg
         if (rawMsg.includes("swap_exact_quantity") || rawMsg.includes("MoveAbort")) {
@@ -223,13 +237,10 @@ function TapTradeContent() {
         } else if (rawMsg.includes("Rejected") || rawMsg.includes("rejected")) {
           userMsg = "Transaction rejected by wallet"
         }
-        setToast({
-          message: userMsg,
-          type: "error",
-        })
+        setToast({ message: userMsg, type: "error" })
       }
     },
-    [currentAccount, currentPrice, quoteBalance, baseBalance, deepBalance, stake, selectedPool, executeTradeAsync, priceStep],
+    [currentAccount, currentPrice, quoteBalance, baseBalance, stake, selectedPool, realTrade, priceStep],
   )
 
   const handleViewChange = useCallback(
@@ -246,6 +257,28 @@ function TapTradeContent() {
     },
     [router, setView],
   )
+
+  // Handle margin manager creation for Quick Trade
+  const handleCreateManager = useCallback(async () => {
+    if (!currentAccount) {
+      setToast({ message: "Connect wallet first", type: "error" })
+      return
+    }
+    try {
+      const poolKey = selectedPool.poolKey as typeof MARGIN_POOL_KEYS[number]
+      await createManager(poolKey)
+      setToast({ message: "Margin account created!", type: "success" })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to create margin account"
+      setToast({ message: msg, type: "error" })
+    }
+  }, [currentAccount, selectedPool.poolKey, createManager, setToast])
+
+  // ResultReveal callback
+  const handleResultComplete = useCallback(() => {
+    setActivePrediction(null)
+    setQuickTradeState('idle')
+  }, [setActivePrediction, setQuickTradeState])
 
   // Portfolio / History views
   if (state.currentView === "portfolio") {
@@ -281,8 +314,13 @@ function TapTradeContent() {
   // Main trading view
   return (
     <div className="fixed inset-0 overflow-hidden gradient-bg dotted-bg">
-      {/* Top bar - responsive layout */}
-      <div className="absolute top-0 left-0 right-0 z-20 px-3 pt-3 pb-1">
+      {/* Testnet indicator */}
+      <div className="absolute top-0 left-0 right-0 z-30 bg-amber-500/90 text-black text-center text-[10px] font-bold py-0.5">
+        TESTNET
+      </div>
+
+      {/* Top bar */}
+      <div className="absolute left-0 right-0 z-20 px-3 pb-1 top-[20px] pt-2">
         <div className="flex items-center justify-between gap-2">
           {/* Left: Asset pill */}
           <AssetPill
@@ -292,8 +330,15 @@ function TapTradeContent() {
             pools={allPools}
             onPoolChange={setSelectedPool}
           />
-          {/* Right: Live + Connect */}
-          <div className="flex items-center gap-2 shrink-0">
+          {/* Right: Mode toggle + Live + Connect */}
+          <div className="flex items-center gap-1.5 shrink-0">
+            {poolSupportsMargin && (
+              <ModeToggle
+                mode={state.predictionMode}
+                onChange={setPredictionMode}
+                disabled={state.quickTradeState !== 'idle'}
+              />
+            )}
             <div
               className={`flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-xs font-medium ${
                 isConnected ? "bg-emerald-500/20 text-emerald-400" : "bg-red-500/20 text-red-400"
@@ -305,39 +350,102 @@ function TapTradeContent() {
             <ConnectButton />
           </div>
         </div>
-        {/* Second row: Zoom selector */}
+
+        {/* Second row: Zoom selector (grid mode) or Round History (quick mode) */}
         <div className="flex justify-center mt-1.5">
-          <TileScaler zoom={zoom} onZoomChange={setZoom} />
+          {isQuickMode ? (
+            <RoundHistory rounds={state.roundHistory} />
+          ) : (
+            <TileScaler zoom={zoom} onZoomChange={setZoom} />
+          )}
         </div>
       </div>
 
       {/* Bottom overlays - above nav */}
-      <div className="absolute bottom-[84px] left-0 right-0 z-20 flex items-center justify-between px-3 py-2">
-        <BalancePill
-          balance={quoteBalance}
-          coinSymbol={selectedPool.quoteCoin}
-          isLoading={balanceLoading}
-          isConnected={!!currentAccount}
-        />
-        <StakeSelector stake={stake} stakes={STAKES} onStakeChange={setStake} />
+      <div className="absolute bottom-[84px] left-0 right-0 z-20">
+        {isQuickMode ? (
+          /* Quick Trade Mode: UP/DOWN controls */
+          <div className="bg-black/40 backdrop-blur-sm border-t border-white/5">
+            {!currentAccount ? (
+              <div className="p-4 text-center text-white/50 text-sm">
+                Connect wallet to trade
+              </div>
+            ) : !managerId ? (
+              <div className="p-4 text-center">
+                <button
+                  onClick={handleCreateManager}
+                  disabled={isCreating}
+                  className="px-6 py-2.5 bg-gradient-to-r from-cyan-500 to-blue-500 text-white rounded-xl font-medium text-sm disabled:opacity-50"
+                >
+                  {isCreating ? 'Creating...' : 'Create Margin Account'}
+                </button>
+                <p className="text-white/40 text-xs mt-2">Required for leveraged trading</p>
+              </div>
+            ) : (
+              <QuickTradeControls
+                currentPrice={currentPrice}
+                poolKey={selectedPool.poolKey}
+                stake={stake}
+                riskRatio={marginPosition?.riskRatio}
+              />
+            )}
+          </div>
+        ) : (
+          /* Grid Mode: Balance + Stake selector */
+          <div className="flex items-center justify-between px-3 py-2">
+            <BalancePill
+              balance={quoteBalance}
+              coinSymbol={selectedPool.quoteCoin}
+              isLoading={balanceLoading}
+              isConnected={!!currentAccount}
+            />
+            <StakeSelector stake={stake} stakes={STAKES} onStakeChange={setStake} />
+          </div>
+        )}
       </div>
 
       {/* Chart area */}
-      <div className="h-full w-full pt-[88px] sm:pt-[92px] pb-[128px] sm:pb-[120px]">
-        <UnifiedChart
-          priceHistory={priceHistory}
-          currentPrice={currentPrice}
-          rows={ROWS}
-          cols={COLS}
-          priceStep={priceStep}
-          timeStepMs={TIME_STEP_MS}
-          historyWindowMs={HISTORY_WINDOW_MS}
-          bets={bets}
-          canBuy={!currentAccount || quoteBalance >= stake}
-          canSell={!currentAccount || (currentPrice ? baseBalance >= stake / currentPrice : false)}
-          onCellClick={handleCellClick}
-        />
+      <div className="h-full w-full pt-[100px] sm:pt-[104px] pb-[128px] sm:pb-[120px]">
+        {!isQuickMode ? (
+          <UnifiedChart
+            priceHistory={priceHistory}
+            currentPrice={currentPrice}
+            rows={ROWS}
+            cols={COLS}
+            priceStep={priceStep}
+            timeStepMs={TIME_STEP_MS}
+            historyWindowMs={HISTORY_WINDOW_MS}
+            bets={bets}
+            canBuy={!currentAccount || quoteBalance >= stake}
+            canSell={!currentAccount || (currentPrice ? baseBalance >= stake / currentPrice : false)}
+            onCellClick={handleCellClick}
+          />
+        ) : (
+          /* Quick mode: show chart without grid overlay */
+          <UnifiedChart
+            priceHistory={priceHistory}
+            currentPrice={currentPrice}
+            rows={ROWS}
+            cols={COLS}
+            priceStep={priceStep}
+            timeStepMs={TIME_STEP_MS}
+            historyWindowMs={HISTORY_WINDOW_MS}
+            bets={[]}
+            canBuy={false}
+            canSell={false}
+            onCellClick={() => {}}
+          />
+        )}
       </div>
+
+      {/* ResultReveal overlay */}
+      {state.quickTradeState === 'result' && state.activePrediction && (
+        <ResultReveal
+          round={state.activePrediction}
+          xpEarned={0}
+          onComplete={handleResultComplete}
+        />
+      )}
 
       {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
 

@@ -1,12 +1,14 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { useCurrentAccount, useDAppKit } from '@mysten/dapp-kit-react';
+import { useCurrentAccount, useCurrentClient, useDAppKit } from '@mysten/dapp-kit-react';
 import type { Transaction } from '@mysten/sui/transactions';
+import type { SuiJsonRpcClient } from '@mysten/sui/jsonRpc';
 import type { Pool, TradeSide, TradeResult } from '@/lib/swipebook/types';
 import {
   buildMarketBuyTransaction,
   buildMarketSellTransaction,
   calculateMinOutput,
 } from '@/lib/deepbook/transactions';
+import { getUserFriendlyError } from '@/lib/deepbook/tx-utils';
 import { useDeepBookClient } from './useDeepBookClient';
 
 interface ExecuteTradeParams {
@@ -18,47 +20,15 @@ interface ExecuteTradeParams {
 }
 
 /**
- * Extract digest and success status from dApp Kit signAndExecuteTransaction result.
- * The result is a discriminated union: { $kind: 'Transaction' | 'FailedTransaction' }
- */
-function parseTransactionResult(result: unknown): { digest: string; success: boolean; error?: string } {
-  const r = result as Record<string, unknown>;
-
-  // dApp Kit v2: discriminated union with $kind
-  if (r.$kind === 'Transaction' && r.Transaction) {
-    const tx = r.Transaction as Record<string, unknown>;
-    const status = tx.status as { success: boolean; error?: { message?: string } } | undefined;
-    return {
-      digest: (tx.digest as string) || 'unknown',
-      success: status?.success !== false,
-      error: status?.success === false ? (status.error?.message || 'Transaction failed on-chain') : undefined,
-    };
-  }
-
-  if (r.$kind === 'FailedTransaction' && r.FailedTransaction) {
-    const tx = r.FailedTransaction as Record<string, unknown>;
-    const status = tx.status as { error?: { message?: string } } | undefined;
-    return {
-      digest: (tx.digest as string) || 'unknown',
-      success: false,
-      error: status?.error?.message || 'Transaction failed on-chain',
-    };
-  }
-
-  // Fallback: try common property paths
-  if (typeof r.digest === 'string') {
-    return { digest: r.digest, success: true };
-  }
-
-  return { digest: 'unknown', success: false, error: 'Could not parse transaction result' };
-}
-
-/**
  * Hook for executing trades on DeepBook using the SDK client.
+ *
+ * Uses sign-only via wallet + direct RPC execution to bypass
+ * the wallet's backend proxy which can return 502 on testnet.
  */
 export function useTradeExecution() {
   const currentAccount = useCurrentAccount();
   const dAppKit = useDAppKit();
+  const suiClient = useCurrentClient() as SuiJsonRpcClient;
   const queryClient = useQueryClient();
   const dbClient = useDeepBookClient();
 
@@ -92,16 +62,27 @@ export function useTradeExecution() {
         });
       }
 
-      const result = await dAppKit.signAndExecuteTransaction({ transaction: tx });
-      const parsed = parseTransactionResult(result);
+      // Sign via wallet (1 prompt), then execute directly via Sui RPC.
+      // This bypasses the wallet's backend proxy which can return 502.
+      const signed = await dAppKit.signTransaction({ transaction: tx });
+      const result = await suiClient.executeTransactionBlock({
+        transactionBlock: signed.bytes,
+        signature: signed.signature,
+        options: { showEffects: true },
+      });
 
-      if (!parsed.success) {
-        throw new Error(parsed.error || `Transaction failed (${parsed.digest.slice(0, 10)}...)`);
+      if (!result.digest) {
+        throw new Error('Transaction submitted but no digest returned');
+      }
+
+      const effects = result.effects;
+      if (effects?.status?.status === 'failure') {
+        throw new Error(effects.status.error || 'Transaction failed on-chain');
       }
 
       return {
         success: true,
-        digest: parsed.digest,
+        digest: result.digest,
         timestamp: Date.now(),
       };
     },
@@ -109,8 +90,8 @@ export function useTradeExecution() {
       queryClient.invalidateQueries({ queryKey: ['user-balance'] });
       queryClient.invalidateQueries({ queryKey: ['pool-market-data'] });
     },
-    onError: (error) => {
-      console.error('Trade failed:', error);
+    onError: (err) => {
+      console.error('Trade failed:', getUserFriendlyError(err));
     },
   });
 
@@ -118,7 +99,7 @@ export function useTradeExecution() {
     executeTrade: mutate,
     executeTradeAsync: mutateAsync,
     isPending,
-    error,
+    error: error ? new Error(getUserFriendlyError(error)) : null,
     reset,
   };
 }

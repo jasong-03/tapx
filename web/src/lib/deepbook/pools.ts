@@ -10,19 +10,22 @@ export const COIN_TYPES = {
   WUSDC: '0x5d4b302506645c37ff133b98c4b50a5ae14841659738d6d733d59d0d217a93bf::coin::COIN',
   BETH: '0xd0e89b2af5e4910726fbcd8b8dd37bb79b29e5f83f7491bca830e94f7f226d29::eth::ETH',
   NS: '0x5145494a5f5100e645e4b0aa950fa6b68f614e8c59e17bc5ded3495123a79178::ns::NS',
-  TYPUS: '0xf82dc05634970553615eef6112a1ac4fb7bf10272bf6cda4f695c420f7c57ab8::typus::TYPUS',
+  TYPUS: '0xf82dc05634970553615eef6112a1ac4fb7bf10272bf6cbe0f80ef44a6c489385::typus::TYPUS',
   AUSD: '0x2053d08c1e2bd02791056171aab0fd12bd7cd7efad2ab8f6b9c8902f14df2ff2::ausd::AUSD',
-  DRF: '0x294de7579d55c110a00a7c1439c2391c2fd4ca0fc5ec1a4361c6fc571b4579a8::drf::DRF',
+  DRF: '0x294de7579d55c110a00a7c4946e09a1b5cbeca2592fbb83fd7bfacba3cfeaf0e::drf::DRF',
   SEND: '0xb45fcfcc2cc07ce0702cc2d229621e046c906ef14d9b25e8e4d25f6e8763fef7::send::SEND',
   WAL: '0x356a26eb9e012a68958082340d4c4116e7f55615cf27affcff209cf0ae544f59::wal::WAL',
-  XBTC: '0x5a5b8db7a73f047f8c5a3f6893b77c0a8e5a3c8d::xbtc::XBTC',
+  XBTC: '0x876a4b7bce8aeaef60464c11f4026903e9afacab79b9b142686158aa86560b50::xbtc::XBTC',
 } as const;
 
-// Testnet coin types
+// Testnet coin types (DeepBook V3 VERSION 15)
 export const TESTNET_COIN_TYPES = {
   SUI: '0x2::sui::SUI',
   DEEP: '0x36dbef866a1d62bf7328989a10fb2f07d769f4ee587c0de4a0a256e57e0a58a8::deep::DEEP',
   DBUSDC: '0xf7152c05930480cd740d7311b5b8b45c6f488e3a53a11c3f74a6fac36a52e0d7::DBUSDC::DBUSDC',
+  DBUSDT: '0xf7152c05930480cd740d7311b5b8b45c6f488e3a53a11c3f74a6fac36a52e0d7::DBUSDT::DBUSDT',
+  WAL: '0x9ef7676a9f81937a52ae4b2af8d511a28a0b080477c0c2db40b0ab8882240d76::wal::WAL',
+  DBTC: '0x6502dae813dbe5e42643c119a6450a518481f03063febc7e20238e43b6ea9e86::dbtc::DBTC',
 } as const;
 
 export type CoinKey = keyof typeof COIN_TYPES;
@@ -38,7 +41,7 @@ export const COIN_DECIMALS: Record<CoinKey, number> = {
   NS: 6,
   TYPUS: 9,
   AUSD: 6,
-  DRF: 9,
+  DRF: 6,
   SEND: 6,
   WAL: 9,
   XBTC: 8,
@@ -208,18 +211,9 @@ export const MAINNET_POOLS: Record<string, Pool> = {
   },
 };
 
-// Testnet pools
+// Testnet pools (DeepBook V3 VERSION 15)
+// DEEP_SUI and DEEP_DBUSDC are whitelisted (0 taker/maker fees)
 export const TESTNET_POOLS: Record<string, Pool> = {
-  SUI_DBUSDC: {
-    poolKey: 'SUI_DBUSDC',
-    address: '0x1c19362ca52b8ffd7a33cee805a67d40f31e6ba303753fd3a4cfdfacea7163a5',
-    baseCoin: 'SUI',
-    quoteCoin: 'DBUSDC',
-    baseType: TESTNET_COIN_TYPES.SUI,
-    quoteType: TESTNET_COIN_TYPES.DBUSDC,
-    baseDecimals: 9,
-    quoteDecimals: 6,
-  },
   DEEP_SUI: {
     poolKey: 'DEEP_SUI',
     address: '0x48c95963e9eac37a316b7ae04a0deb761bcdcc2b67912374d6036e7f0e9bae9f',
@@ -230,6 +224,16 @@ export const TESTNET_POOLS: Record<string, Pool> = {
     baseDecimals: 6,
     quoteDecimals: 9,
   },
+  SUI_DBUSDC: {
+    poolKey: 'SUI_DBUSDC',
+    address: '0x1c19362ca52b8ffd7a33cee805a67d40f31e6ba303753fd3a4cfdfacea7163a5',
+    baseCoin: 'SUI',
+    quoteCoin: 'DBUSDC',
+    baseType: TESTNET_COIN_TYPES.SUI,
+    quoteType: TESTNET_COIN_TYPES.DBUSDC,
+    baseDecimals: 9,
+    quoteDecimals: 6,
+  },
   DEEP_DBUSDC: {
     poolKey: 'DEEP_DBUSDC',
     address: '0xe86b991f8632217505fd859445f9803967ac84a9d4a1219065bf191fcb74b622',
@@ -238,6 +242,46 @@ export const TESTNET_POOLS: Record<string, Pool> = {
     baseType: TESTNET_COIN_TYPES.DEEP,
     quoteType: TESTNET_COIN_TYPES.DBUSDC,
     baseDecimals: 6,
+    quoteDecimals: 6,
+  },
+  DBUSDT_DBUSDC: {
+    poolKey: 'DBUSDT_DBUSDC',
+    address: '0x83970bb02e3636efdff8c141ab06af5e3c9a22e2f74d7f02a9c3430d0d10c1ca',
+    baseCoin: 'DBUSDT',
+    quoteCoin: 'DBUSDC',
+    baseType: TESTNET_COIN_TYPES.DBUSDT,
+    quoteType: TESTNET_COIN_TYPES.DBUSDC,
+    baseDecimals: 6,
+    quoteDecimals: 6,
+  },
+  WAL_DBUSDC: {
+    poolKey: 'WAL_DBUSDC',
+    address: '0xeb524b6aea0ec4b494878582e0b78924208339d360b62aec4a8ecd4031520dbb',
+    baseCoin: 'WAL',
+    quoteCoin: 'DBUSDC',
+    baseType: TESTNET_COIN_TYPES.WAL,
+    quoteType: TESTNET_COIN_TYPES.DBUSDC,
+    baseDecimals: 9,
+    quoteDecimals: 6,
+  },
+  WAL_SUI: {
+    poolKey: 'WAL_SUI',
+    address: '0x8c1c1b186c4fddab1ebd53e0895a36c1d1b3b9a77cd34e607bef49a38af0150a',
+    baseCoin: 'WAL',
+    quoteCoin: 'SUI',
+    baseType: TESTNET_COIN_TYPES.WAL,
+    quoteType: TESTNET_COIN_TYPES.SUI,
+    baseDecimals: 9,
+    quoteDecimals: 9,
+  },
+  DBTC_DBUSDC: {
+    poolKey: 'DBTC_DBUSDC',
+    address: '0x0dce0aa771074eb83d1f4a29d48be8248d4d2190976a5241f66b43ec18fa34de',
+    baseCoin: 'DBTC',
+    quoteCoin: 'DBUSDC',
+    baseType: TESTNET_COIN_TYPES.DBTC,
+    quoteType: TESTNET_COIN_TYPES.DBUSDC,
+    baseDecimals: 8,
     quoteDecimals: 6,
   },
 };
@@ -254,9 +298,13 @@ export const SWIPEBOOK_POOL_KEYS = [
 ] as const;
 
 export const TESTNET_SWIPEBOOK_POOL_KEYS = [
+  'DEEP_SUI',       // 0 fees (whitelisted)
   'SUI_DBUSDC',
-  'DEEP_SUI',
-  'DEEP_DBUSDC',
+  'DEEP_DBUSDC',    // 0 fees (whitelisted)
+  'DBUSDT_DBUSDC',
+  'WAL_DBUSDC',
+  'WAL_SUI',
+  'DBTC_DBUSDC',
 ] as const;
 
 export type SwipeBookPoolKey = (typeof SWIPEBOOK_POOL_KEYS)[number];
