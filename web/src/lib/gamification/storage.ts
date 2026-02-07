@@ -225,3 +225,28 @@ export function saveEarnedAchievement(address: string, achievementId: string): v
     console.error('Error saving earned achievement:', error);
   }
 }
+
+// ---- Round history persistence for margin trades ----
+
+const ROUND_HISTORY_KEY = 'tapx_margin_rounds';
+
+export function loadRoundHistory(address: string): unknown[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const key = `${ROUND_HISTORY_KEY}_${address}`;
+    const stored = localStorage.getItem(key);
+    return stored ? JSON.parse(stored) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveRoundHistory(address: string, rounds: unknown[]): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const key = `${ROUND_HISTORY_KEY}_${address}`;
+    localStorage.setItem(key, JSON.stringify(rounds.slice(0, 50)));
+  } catch {
+    console.error('Failed to save round history');
+  }
+}

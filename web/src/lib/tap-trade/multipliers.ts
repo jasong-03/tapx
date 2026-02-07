@@ -47,3 +47,16 @@ export function calculateMultiplier(
 export function formatMultiplier(mult: number): string {
   return `${mult.toFixed(2)}x`
 }
+
+/**
+ * Calculate leverage-adjusted cell multiplier for grid mode.
+ * Returns percentage return if price reaches target.
+ */
+export function calculateLeveragedMultiplier(
+  currentPrice: number,
+  targetPrice: number,
+  leverage: number,
+): number {
+  const distance = Math.abs(targetPrice - currentPrice) / currentPrice;
+  return leverage * distance * 100; // as percentage
+}

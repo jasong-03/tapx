@@ -72,3 +72,56 @@ export function useDeepBookClient() {
 
   return deepBookClient;
 }
+
+/**
+ * Hook to get a margin-aware DeepBook client.
+ * Accepts margin manager references for margin operations.
+ */
+/**
+ * Hook to get a margin-aware DeepBook client.
+ * Accepts margin manager references for margin operations.
+ * marginManagers should be Record<string, { address: string; poolKey: string }>
+ */
+export function useMarginClient(marginManagers?: Record<string, { address: string; poolKey: string }>) {
+  const suiClient = useCurrentClient();
+  const currentAccount = useCurrentAccount();
+
+  const marginClient = useMemo(() => {
+    if (!suiClient || !currentAccount) return null;
+
+    const patchedCore = new Proxy(suiClient.core, {
+      get(target, prop, receiver) {
+        if (prop === 'simulateTransaction') {
+          return async (options: { transaction: unknown; [key: string]: unknown }) => {
+            if (
+              options.transaction &&
+              !(options.transaction instanceof Uint8Array) &&
+              typeof (options.transaction as Transaction).setSenderIfNotSet === 'function'
+            ) {
+              (options.transaction as Transaction).setSenderIfNotSet(currentAccount.address);
+            }
+            return target.simulateTransaction(
+              options as Parameters<typeof target.simulateTransaction>[0],
+            );
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+
+    const patchedClient = Object.create(suiClient, {
+      core: { value: patchedCore, enumerable: true },
+    });
+
+    return new DeepBookClient({
+      client: patchedClient,
+      address: currentAccount.address,
+      network: suiClient.network,
+      ...(marginManagers && Object.keys(marginManagers).length > 0
+        ? { marginManagers }
+        : {}),
+    });
+  }, [suiClient, currentAccount, marginManagers]);
+
+  return marginClient;
+}

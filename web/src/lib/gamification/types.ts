@@ -34,6 +34,17 @@ export interface UserStats {
   winRate: number;
 }
 
+export interface MarginStats {
+  marginTrades: number;
+  profitableMarginTrades: number;
+  marginWinStreak: number;
+  bestMarginWinStreak: number;
+  profitable5xTrades: number;
+  profitable15sTrades: number;
+  bestTradePnL: number;
+  totalMarginVolume: number;
+}
+
 export interface Achievement {
   id: string;
   name: string;
@@ -49,7 +60,10 @@ export type AchievementTrigger =
   | { type: 'streak_days'; days: number }
   | { type: 'profit_streak'; count: number }
   | { type: 'volume_total'; amount: number }
-  | { type: 'win_rate'; rate: number; minTrades: number };
+  | { type: 'win_rate'; rate: number; minTrades: number }
+  | { type: 'margin_trades'; count: number }
+  | { type: 'margin_streak'; count: number }
+  | { type: 'margin_pnl'; amount: number };
 
 export interface XPAwardResult {
   xpAwarded: number;

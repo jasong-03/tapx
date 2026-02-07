@@ -12,14 +12,51 @@ import type {
 import type { TradingSignal, RiskScore } from '@/lib/signals/types';
 import type { SocialSignals } from '@/lib/social/types';
 import type { UserProgress } from '@/lib/gamification/types';
+import type { LeverageValue, TimeframeValue } from '@/lib/deepbook/margin-config';
 
-// Extended state interface with new features
+// Prediction round types
+export type PredictionDirection = 'long' | 'short';
+export type QuickTradeState = 'idle' | 'opening' | 'watching' | 'closing' | 'result';
+export type PredictionMode = 'quick' | 'grid';
+
+export interface PredictionRound {
+  id: string;
+  poolKey: string;
+  direction: PredictionDirection;
+  leverage: LeverageValue;
+  collateral: number;
+  entryPrice: number;
+  baseQuantity: number; // position size in base units (needed for closing)
+  exitPrice?: number;
+  timeframe: TimeframeValue;
+  startedAt: number;
+  closedAt?: number;
+  pnl?: number;
+  pnlPercent?: number;
+  txDigestOpen?: string;
+  txDigestClose?: string;
+  result?: 'win' | 'loss' | 'liquidated';
+}
+
+// Extended state interface with margin/prediction features
 interface ExtendedSwipeBookState extends SwipeBookState {
   signals: Map<string, TradingSignal>;
   risks: Map<string, RiskScore>;
   social: Map<string, SocialSignals>;
   userProgress: UserProgress | null;
   watchlist: string[];
+  // Margin/prediction state
+  quickTradeState: QuickTradeState;
+  activePrediction: PredictionRound | null;
+  selectedTimeframe: TimeframeValue;
+  selectedLeverage: LeverageValue;
+  predictionMode: PredictionMode;
+  roundHistory: PredictionRound[];
+  marginManagerId: string | null;
+  // Grid mode
+  activeGridOrderId: string | null;
+  // Simulation mode
+  simulationMode: boolean;
 }
 
 // Extended action types
@@ -34,7 +71,17 @@ type ExtendedSwipeBookAction =
   | { type: 'SET_USER_PROGRESS'; payload: UserProgress | null }
   | { type: 'SET_WATCHLIST'; payload: string[] }
   | { type: 'ADD_TO_WATCHLIST'; payload: string }
-  | { type: 'REMOVE_FROM_WATCHLIST'; payload: string };
+  | { type: 'REMOVE_FROM_WATCHLIST'; payload: string }
+  // Margin/prediction actions
+  | { type: 'SET_QUICK_TRADE_STATE'; payload: QuickTradeState }
+  | { type: 'SET_ACTIVE_PREDICTION'; payload: PredictionRound | null }
+  | { type: 'SET_TIMEFRAME'; payload: TimeframeValue }
+  | { type: 'SET_LEVERAGE'; payload: LeverageValue }
+  | { type: 'SET_PREDICTION_MODE'; payload: PredictionMode }
+  | { type: 'ADD_ROUND'; payload: PredictionRound }
+  | { type: 'SET_MARGIN_MANAGER'; payload: string | null }
+  | { type: 'SET_GRID_ORDER_ID'; payload: string | null }
+  | { type: 'SET_SIMULATION_MODE'; payload: boolean };
 
 const initialState: ExtendedSwipeBookState = {
   currentView: 'swipe',
@@ -50,6 +97,16 @@ const initialState: ExtendedSwipeBookState = {
   social: new Map(),
   userProgress: null,
   watchlist: [],
+  // Margin/prediction defaults
+  quickTradeState: 'idle',
+  activePrediction: null,
+  selectedTimeframe: 30,
+  selectedLeverage: 2,
+  predictionMode: 'quick',
+  roundHistory: [],
+  marginManagerId: null,
+  activeGridOrderId: null,
+  simulationMode: false, // Live testnet mode
 };
 
 function swipeBookReducer(state: ExtendedSwipeBookState, action: ExtendedSwipeBookAction): ExtendedSwipeBookState {
@@ -101,7 +158,6 @@ function swipeBookReducer(state: ExtendedSwipeBookState, action: ExtendedSwipeBo
       };
     case 'CLEAR_ERROR':
       return { ...state, error: null };
-    // New action handlers
     case 'SET_SIGNALS':
       return { ...state, signals: action.payload };
     case 'SET_SIGNAL': {
@@ -137,6 +193,27 @@ function swipeBookReducer(state: ExtendedSwipeBookState, action: ExtendedSwipeBo
         ...state,
         watchlist: state.watchlist.filter((addr) => addr !== action.payload),
       };
+    // Margin/prediction reducers
+    case 'SET_QUICK_TRADE_STATE':
+      return { ...state, quickTradeState: action.payload };
+    case 'SET_ACTIVE_PREDICTION':
+      return { ...state, activePrediction: action.payload };
+    case 'SET_TIMEFRAME':
+      return { ...state, selectedTimeframe: action.payload };
+    case 'SET_LEVERAGE':
+      return { ...state, selectedLeverage: action.payload };
+    case 'SET_PREDICTION_MODE':
+      return { ...state, predictionMode: action.payload };
+    case 'ADD_ROUND': {
+      const history = [action.payload, ...state.roundHistory].slice(0, 50);
+      return { ...state, roundHistory: history };
+    }
+    case 'SET_MARGIN_MANAGER':
+      return { ...state, marginManagerId: action.payload };
+    case 'SET_GRID_ORDER_ID':
+      return { ...state, activeGridOrderId: action.payload };
+    case 'SET_SIMULATION_MODE':
+      return { ...state, simulationMode: action.payload };
     default:
       return state;
   }
@@ -157,7 +234,6 @@ interface SwipeBookContextValue {
   tradeSuccess: (digest: string) => void;
   tradeError: (error: string) => void;
   clearError: () => void;
-  // New convenience actions
   setSignals: (signals: Map<string, TradingSignal>) => void;
   setSignal: (poolAddress: string, signal: TradingSignal) => void;
   setRisks: (risks: Map<string, RiskScore>) => void;
@@ -168,6 +244,16 @@ interface SwipeBookContextValue {
   setWatchlist: (watchlist: string[]) => void;
   addToWatchlist: (poolAddress: string) => void;
   removeFromWatchlist: (poolAddress: string) => void;
+  // Margin/prediction convenience actions
+  setQuickTradeState: (state: QuickTradeState) => void;
+  setActivePrediction: (prediction: PredictionRound | null) => void;
+  setTimeframe: (tf: TimeframeValue) => void;
+  setLeverage: (lev: LeverageValue) => void;
+  setPredictionMode: (mode: PredictionMode) => void;
+  addRound: (round: PredictionRound) => void;
+  setMarginManager: (id: string | null) => void;
+  setGridOrderId: (id: string | null) => void;
+  setSimulationMode: (mode: boolean) => void;
   // Computed values
   currentPool: PoolWithMarketData | null;
   currentSignal: TradingSignal | null;
@@ -212,7 +298,6 @@ export function SwipeBookProvider({ children }: { children: ReactNode }) {
     tradeSuccess: (digest) => dispatch({ type: 'TRADE_SUCCESS', payload: digest }),
     tradeError: (error) => dispatch({ type: 'TRADE_ERROR', payload: error }),
     clearError: () => dispatch({ type: 'CLEAR_ERROR' }),
-    // New actions
     setSignals: (signals) => dispatch({ type: 'SET_SIGNALS', payload: signals }),
     setSignal: (poolAddress, signal) =>
       dispatch({ type: 'SET_SIGNAL', payload: { poolAddress, signal } }),
@@ -227,6 +312,16 @@ export function SwipeBookProvider({ children }: { children: ReactNode }) {
     addToWatchlist: (poolAddress) => dispatch({ type: 'ADD_TO_WATCHLIST', payload: poolAddress }),
     removeFromWatchlist: (poolAddress) =>
       dispatch({ type: 'REMOVE_FROM_WATCHLIST', payload: poolAddress }),
+    // Margin/prediction actions
+    setQuickTradeState: (s) => dispatch({ type: 'SET_QUICK_TRADE_STATE', payload: s }),
+    setActivePrediction: (p) => dispatch({ type: 'SET_ACTIVE_PREDICTION', payload: p }),
+    setTimeframe: (tf) => dispatch({ type: 'SET_TIMEFRAME', payload: tf }),
+    setLeverage: (lev) => dispatch({ type: 'SET_LEVERAGE', payload: lev }),
+    setPredictionMode: (mode) => dispatch({ type: 'SET_PREDICTION_MODE', payload: mode }),
+    addRound: (round) => dispatch({ type: 'ADD_ROUND', payload: round }),
+    setMarginManager: (id) => dispatch({ type: 'SET_MARGIN_MANAGER', payload: id }),
+    setGridOrderId: (id) => dispatch({ type: 'SET_GRID_ORDER_ID', payload: id }),
+    setSimulationMode: (mode) => dispatch({ type: 'SET_SIMULATION_MODE', payload: mode }),
     // Computed values
     currentPool,
     currentSignal,

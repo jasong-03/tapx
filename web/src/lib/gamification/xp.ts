@@ -108,3 +108,20 @@ export function getLevelProgress(totalXp: number): number {
   const xpForCurrentLevel = XP_TABLE[level + 1];
   return Math.min(100, (xp / xpForCurrentLevel) * 100);
 }
+
+/**
+ * Calculate XP for a margin trade round
+ */
+export function calculateMarginTradeXP(params: {
+  leverage: number;
+  isProfit: boolean;
+  pnlPercent: number;
+  timeframe: number;
+  streakMultiplier: number;
+}): number {
+  const baseXP = 50;
+  const leverageBonus = params.leverage;
+  const profitBonus = params.isProfit ? 2 : 1;
+  const speedBonus = params.timeframe <= 15 ? 1.5 : 1;
+  return Math.round(baseXP * leverageBonus * profitBonus * speedBonus * params.streakMultiplier);
+}

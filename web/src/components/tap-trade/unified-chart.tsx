@@ -2,9 +2,11 @@
 
 import type React from "react"
 import { useEffect, useRef, useState, useCallback } from "react"
-import { calculateMultiplier, formatMultiplier } from "@/lib/tap-trade/multipliers"
+import { calculateMultiplier, formatMultiplier, calculateLeveragedMultiplier } from "@/lib/tap-trade/multipliers"
 import type { PriceTick } from "@/lib/tap-trade/binance"
 import type { Bet } from "@/lib/tap-trade/betting"
+import type { PredictionMode, PredictionRound, QuickTradeState } from "@/context/SwipeBookContext"
+import { calculateLiquidationPrice } from "@/lib/deepbook/margin-config"
 
 interface UnifiedChartProps {
   priceHistory: PriceTick[]
@@ -27,6 +29,12 @@ interface UnifiedChartProps {
     multiplier: number,
     absolutePrice: number,
   ) => void
+  // Margin overlay props
+  activePrediction?: PredictionRound | null
+  quickTradeState?: QuickTradeState
+  // Grid mode props
+  predictionMode?: PredictionMode
+  selectedLeverage?: number
 }
 
 interface HitAnimation {
@@ -49,6 +57,10 @@ export function UnifiedChart({
   canBuy = true,
   canSell = true,
   onCellClick,
+  activePrediction,
+  quickTradeState,
+  predictionMode = 'quick',
+  selectedLeverage = 2,
 }: UnifiedChartProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -260,16 +272,64 @@ export function UnifiedChart({
             const isBuyCell = cellCenterPrice >= (currentPrice ?? 0)
             const isAffordable = isBuyCell ? canBuy : canSell
 
-            if (isTooClose) {
-              ctx.fillStyle = "rgba(255, 100, 100, 0.15)"
-            } else if (!isAffordable) {
-              ctx.fillStyle = "rgba(255, 150, 220, 0.08)"
-            } else if (isHovered) {
-              ctx.fillStyle = "rgba(255, 200, 255, 0.9)"
+            if (predictionMode === 'grid' && !isTooClose && isAffordable) {
+              // Grid mode: direction-based colored cells
+              const direction = cellCenterPrice > (currentPrice ?? 0) ? 'long' : 'short';
+              const leveragedMult = calculateLeveragedMultiplier(
+                currentPrice ?? 1,
+                cellCenterPrice,
+                selectedLeverage,
+              );
+              const intensity = Math.min(leveragedMult / 30, 1);
+              const alpha = (0.1 + intensity * 0.4).toFixed(2);
+
+              if (direction === 'long') {
+                ctx.fillStyle = `rgba(0, 255, 136, ${alpha})`;
+              } else {
+                ctx.fillStyle = `rgba(255, 68, 68, ${alpha})`;
+              }
+
+              // Fill cell background
+              const cellTopY2 = priceToY(price + priceStep);
+              const cellBottomY2 = priceToY(price);
+              const cellLeftX2 = getX(currentSlotStart + col * timeStepMs);
+              ctx.fillRect(cellLeftX2, cellTopY2, cellWidth, cellBottomY2 - cellTopY2);
+
+              // Multiplier label
+              if (leveragedMult >= 1) {
+                ctx.fillStyle = "rgba(255, 255, 255, 0.8)";
+                ctx.font = isMobile ? "8px monospace" : "10px monospace";
+                ctx.textAlign = "center";
+                ctx.textBaseline = "middle";
+                ctx.fillText(`${leveragedMult.toFixed(1)}%`, cellCenterX, cellCenterY);
+              }
+
+              // Hover highlight for grid mode
+              if (isHovered) {
+                ctx.strokeStyle = "rgba(255, 255, 255, 0.6)";
+                ctx.lineWidth = 1.5;
+                const cellTopY3 = priceToY(price + priceStep);
+                const cellBottomY3 = priceToY(price);
+                const cellLeftX3 = getX(currentSlotStart + col * timeStepMs);
+                ctx.strokeRect(cellLeftX3, cellTopY3, cellWidth, cellBottomY3 - cellTopY3);
+              }
             } else {
-              ctx.fillStyle = "rgba(255, 150, 220, 0.3)"
+              // Quick mode — direction-colored cells
+              const isLong = cellCenterPrice > (currentPrice ?? 0);
+              if (isTooClose) {
+                ctx.fillStyle = "rgba(255, 100, 100, 0.15)"
+              } else if (!isAffordable) {
+                ctx.fillStyle = isLong ? "rgba(0, 255, 136, 0.06)" : "rgba(255, 68, 68, 0.06)"
+              } else if (isHovered) {
+                ctx.fillStyle = isLong ? "rgba(0, 255, 136, 0.9)" : "rgba(255, 68, 68, 0.9)"
+              } else {
+                ctx.fillStyle = isLong ? "rgba(0, 255, 136, 0.25)" : "rgba(255, 68, 68, 0.25)"
+              }
+              ctx.font = isMobile ? "9px monospace" : "11px monospace"
+              ctx.textAlign = "center"
+              ctx.textBaseline = "middle"
+              ctx.fillText(formatMultiplier(multiplier), cellCenterX, cellCenterY)
             }
-            ctx.fillText(formatMultiplier(multiplier), cellCenterX, cellCenterY)
           }
         }
       }
@@ -617,6 +677,103 @@ export function UnifiedChart({
         }
       }
 
+      // === Margin Trade Overlays ===
+      if (activePrediction && (quickTradeState === 'watching' || quickTradeState === 'closing' || quickTradeState === 'result')) {
+        const entryY = priceToY(activePrediction.entryPrice)
+
+        // Entry price line (dashed, neon green)
+        ctx.save()
+        ctx.setLineDash([8, 4])
+        ctx.strokeStyle = "#00ff88"
+        ctx.lineWidth = 1
+        ctx.beginPath()
+        ctx.moveTo(padding.left, entryY)
+        ctx.lineTo(dimensions.width - padding.right, entryY)
+        ctx.stroke()
+        ctx.setLineDash([])
+
+        // Entry label
+        ctx.fillStyle = "#00ff88"
+        ctx.font = "bold 9px monospace"
+        ctx.textAlign = "left"
+        ctx.fillText(`Entry $${activePrediction.entryPrice.toFixed(4)}`, padding.left + 4, entryY - 4)
+
+        // Liquidation price line (dashed, red)
+        const liqPrice = calculateLiquidationPrice(
+          activePrediction.entryPrice,
+          activePrediction.leverage,
+          activePrediction.direction === 'long',
+        )
+        const liqY = priceToY(liqPrice)
+
+        ctx.setLineDash([4, 4])
+        ctx.strokeStyle = "#ff4444"
+        ctx.lineWidth = 1
+        ctx.beginPath()
+        ctx.moveTo(padding.left, liqY)
+        ctx.lineTo(dimensions.width - padding.right, liqY)
+        ctx.stroke()
+        ctx.setLineDash([])
+
+        // Liq label
+        ctx.fillStyle = "#ff4444"
+        ctx.font = "bold 9px monospace"
+        ctx.fillText(`Liq $${liqPrice.toFixed(4)}`, padding.left + 4, liqY - 4)
+
+        // PnL overlay (centered)
+        if (currentPrice) {
+          const priceDiff = currentPrice - activePrediction.entryPrice
+          const pnl = activePrediction.direction === 'long'
+            ? priceDiff * activePrediction.collateral * activePrediction.leverage / activePrediction.entryPrice
+            : -priceDiff * activePrediction.collateral * activePrediction.leverage / activePrediction.entryPrice
+          const pnlText = pnl >= 0 ? `+$${pnl.toFixed(2)}` : `-$${Math.abs(pnl).toFixed(2)}`
+          ctx.fillStyle = pnl >= 0 ? "#00ff88" : "#ff4444"
+          ctx.font = "bold 24px monospace"
+          ctx.textAlign = "center"
+          ctx.textBaseline = "middle"
+          ctx.fillText(pnlText, dimensions.width / 2, dimensions.height / 2 - 20)
+
+          // PnL percentage below
+          const pnlPct = (pnl / activePrediction.collateral) * 100
+          ctx.font = "14px monospace"
+          ctx.fillText(`${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%`, dimensions.width / 2, dimensions.height / 2 + 8)
+        }
+
+        // Countdown ring (top-right)
+        if (quickTradeState === 'watching') {
+          const elapsed = (now - activePrediction.startedAt) / 1000
+          const progress = Math.min(1, elapsed / activePrediction.timeframe)
+          const remaining = Math.max(0, activePrediction.timeframe - elapsed)
+          const cx = dimensions.width - padding.right - 30
+          const cy = padding.top + 30
+          const radius = 20
+
+          // Background ring
+          ctx.beginPath()
+          ctx.arc(cx, cy, radius, 0, Math.PI * 2)
+          ctx.strokeStyle = "rgba(255, 255, 255, 0.1)"
+          ctx.lineWidth = 3
+          ctx.stroke()
+
+          // Progress ring
+          const angle = progress * Math.PI * 2
+          ctx.beginPath()
+          ctx.arc(cx, cy, radius, -Math.PI / 2, -Math.PI / 2 + angle)
+          ctx.strokeStyle = progress > 0.8 ? "#ff4444" : "#00ff88"
+          ctx.lineWidth = 3
+          ctx.stroke()
+
+          // Center text
+          ctx.fillStyle = "rgba(255, 255, 255, 0.9)"
+          ctx.font = "bold 12px monospace"
+          ctx.textAlign = "center"
+          ctx.textBaseline = "middle"
+          ctx.fillText(`${Math.ceil(remaining)}`, cx, cy)
+        }
+
+        ctx.restore()
+      }
+
       animationRef.current = requestAnimationFrame(draw)
     }
 
@@ -644,6 +801,10 @@ export function UnifiedChart({
     futureTimeMs,
     canBuy,
     canSell,
+    activePrediction,
+    quickTradeState,
+    predictionMode,
+    selectedLeverage,
   ])
 
   const handleClick = useCallback(

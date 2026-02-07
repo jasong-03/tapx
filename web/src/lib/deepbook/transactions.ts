@@ -21,7 +21,7 @@ export function buildMarketBuyTransaction(
   const [base, quote, deep] = dbClient.deepBook.swapExactQuoteForBase({
     poolKey: params.poolKey,
     amount: params.quoteAmount,
-    deepAmount: 0.5,
+    deepAmount: 0, // No DEEP required — fees paid from input token
     minOut: params.minBaseOut,
   })(tx);
 
@@ -49,7 +49,7 @@ export function buildMarketSellTransaction(
   const [base, quote, deep] = dbClient.deepBook.swapExactBaseForQuote({
     poolKey: params.poolKey,
     amount: params.baseAmount,
-    deepAmount: 0.5,
+    deepAmount: 0, // No DEEP required — fees paid from input token
     minOut: params.minQuoteOut,
   })(tx);
 
