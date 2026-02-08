@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useRef, useCallback } from "react"
+import { useState, useEffect, useRef, useCallback, useMemo } from "react"
 import { SuiJsonRpcClient, getJsonRpcFullnodeUrl } from "@mysten/sui/jsonRpc"
 import { Transaction } from "@mysten/sui/transactions"
 import type { Pool } from "@/lib/swipebook/types"
@@ -114,8 +114,11 @@ export function useDeepBookPriceStream(
   const poolKeyRef = useRef<string | null>(null)
   const inflightRef = useRef(false)
 
-  // Resolve the mainnet pool for price data
-  const mainnetPool = pool ? getMainnetPool(pool.poolKey) : null
+  // Resolve the mainnet pool for price data (memoize to avoid new object each render)
+  const mainnetPool = useMemo(
+    () => (pool ? getMainnetPool(pool.poolKey) : null),
+    [pool?.poolKey],
+  )
 
   const poll = useCallback(async () => {
     if (!mainnetPool) return

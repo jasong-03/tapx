@@ -1,6 +1,6 @@
 "use client"
 
-import { createContext, useContext, useReducer, useMemo, type ReactNode } from 'react';
+import { createContext, useContext, useReducer, useMemo, useCallback, type ReactNode } from 'react';
 import type {
   SwipeBookState,
   SwipeBookAction,
@@ -287,50 +287,54 @@ export function SwipeBookProvider({ children }: { children: ReactNode }) {
     return state.social.get(currentPool.address) || null;
   }, [currentPool, state.social]);
 
+  // Stable action creators — dispatch from useReducer never changes
+  const actions = useMemo(() => ({
+    setView: (view: SwipeBookView) => dispatch({ type: 'SET_VIEW', payload: view }),
+    setPools: (pools: PoolWithMarketData[]) => dispatch({ type: 'SET_POOLS', payload: pools }),
+    nextPool: () => dispatch({ type: 'NEXT_POOL' }),
+    prevPool: () => dispatch({ type: 'PREV_POOL' }),
+    initiateTrade: (intent: TradeIntent) => dispatch({ type: 'INITIATE_TRADE', payload: intent }),
+    setPreview: (preview: TradePreview) => dispatch({ type: 'SET_PREVIEW', payload: preview }),
+    cancelTrade: () => dispatch({ type: 'CANCEL_TRADE' }),
+    startExecuting: () => dispatch({ type: 'START_EXECUTING' }),
+    tradeSuccess: (digest: string) => dispatch({ type: 'TRADE_SUCCESS', payload: digest }),
+    tradeError: (error: string) => dispatch({ type: 'TRADE_ERROR', payload: error }),
+    clearError: () => dispatch({ type: 'CLEAR_ERROR' }),
+    setSignals: (signals: Map<string, TradingSignal>) => dispatch({ type: 'SET_SIGNALS', payload: signals }),
+    setSignal: (poolAddress: string, signal: TradingSignal) =>
+      dispatch({ type: 'SET_SIGNAL', payload: { poolAddress, signal } }),
+    setRisks: (risks: Map<string, RiskScore>) => dispatch({ type: 'SET_RISKS', payload: risks }),
+    setRisk: (poolAddress: string, risk: RiskScore) =>
+      dispatch({ type: 'SET_RISK', payload: { poolAddress, risk } }),
+    setSocial: (social: Map<string, SocialSignals>) => dispatch({ type: 'SET_SOCIAL', payload: social }),
+    setSocialSignals: (poolAddress: string, social: SocialSignals) =>
+      dispatch({ type: 'SET_SOCIAL_SIGNALS', payload: { poolAddress, social } }),
+    setUserProgress: (progress: UserProgress | null) => dispatch({ type: 'SET_USER_PROGRESS', payload: progress }),
+    setWatchlist: (watchlist: string[]) => dispatch({ type: 'SET_WATCHLIST', payload: watchlist }),
+    addToWatchlist: (poolAddress: string) => dispatch({ type: 'ADD_TO_WATCHLIST', payload: poolAddress }),
+    removeFromWatchlist: (poolAddress: string) =>
+      dispatch({ type: 'REMOVE_FROM_WATCHLIST', payload: poolAddress }),
+    setQuickTradeState: (s: QuickTradeState) => dispatch({ type: 'SET_QUICK_TRADE_STATE', payload: s }),
+    setActivePrediction: (p: PredictionRound | null) => dispatch({ type: 'SET_ACTIVE_PREDICTION', payload: p }),
+    setTimeframe: (tf: TimeframeValue) => dispatch({ type: 'SET_TIMEFRAME', payload: tf }),
+    setLeverage: (lev: LeverageValue) => dispatch({ type: 'SET_LEVERAGE', payload: lev }),
+    setPredictionMode: (mode: PredictionMode) => dispatch({ type: 'SET_PREDICTION_MODE', payload: mode }),
+    addRound: (round: PredictionRound) => dispatch({ type: 'ADD_ROUND', payload: round }),
+    setMarginManager: (id: string | null) => dispatch({ type: 'SET_MARGIN_MANAGER', payload: id }),
+    setGridOrderId: (id: string | null) => dispatch({ type: 'SET_GRID_ORDER_ID', payload: id }),
+    setSimulationMode: (mode: boolean) => dispatch({ type: 'SET_SIMULATION_MODE', payload: mode }),
+  }), [dispatch]);
+
   const value: SwipeBookContextValue = useMemo(() => ({
     state,
     dispatch,
-    setView: (view) => dispatch({ type: 'SET_VIEW', payload: view }),
-    setPools: (pools) => dispatch({ type: 'SET_POOLS', payload: pools }),
-    nextPool: () => dispatch({ type: 'NEXT_POOL' }),
-    prevPool: () => dispatch({ type: 'PREV_POOL' }),
-    initiateTrade: (intent) => dispatch({ type: 'INITIATE_TRADE', payload: intent }),
-    setPreview: (preview) => dispatch({ type: 'SET_PREVIEW', payload: preview }),
-    cancelTrade: () => dispatch({ type: 'CANCEL_TRADE' }),
-    startExecuting: () => dispatch({ type: 'START_EXECUTING' }),
-    tradeSuccess: (digest) => dispatch({ type: 'TRADE_SUCCESS', payload: digest }),
-    tradeError: (error) => dispatch({ type: 'TRADE_ERROR', payload: error }),
-    clearError: () => dispatch({ type: 'CLEAR_ERROR' }),
-    setSignals: (signals) => dispatch({ type: 'SET_SIGNALS', payload: signals }),
-    setSignal: (poolAddress, signal) =>
-      dispatch({ type: 'SET_SIGNAL', payload: { poolAddress, signal } }),
-    setRisks: (risks) => dispatch({ type: 'SET_RISKS', payload: risks }),
-    setRisk: (poolAddress, risk) =>
-      dispatch({ type: 'SET_RISK', payload: { poolAddress, risk } }),
-    setSocial: (social) => dispatch({ type: 'SET_SOCIAL', payload: social }),
-    setSocialSignals: (poolAddress, social) =>
-      dispatch({ type: 'SET_SOCIAL_SIGNALS', payload: { poolAddress, social } }),
-    setUserProgress: (progress) => dispatch({ type: 'SET_USER_PROGRESS', payload: progress }),
-    setWatchlist: (watchlist) => dispatch({ type: 'SET_WATCHLIST', payload: watchlist }),
-    addToWatchlist: (poolAddress) => dispatch({ type: 'ADD_TO_WATCHLIST', payload: poolAddress }),
-    removeFromWatchlist: (poolAddress) =>
-      dispatch({ type: 'REMOVE_FROM_WATCHLIST', payload: poolAddress }),
-    // Margin/prediction actions
-    setQuickTradeState: (s) => dispatch({ type: 'SET_QUICK_TRADE_STATE', payload: s }),
-    setActivePrediction: (p) => dispatch({ type: 'SET_ACTIVE_PREDICTION', payload: p }),
-    setTimeframe: (tf) => dispatch({ type: 'SET_TIMEFRAME', payload: tf }),
-    setLeverage: (lev) => dispatch({ type: 'SET_LEVERAGE', payload: lev }),
-    setPredictionMode: (mode) => dispatch({ type: 'SET_PREDICTION_MODE', payload: mode }),
-    addRound: (round) => dispatch({ type: 'ADD_ROUND', payload: round }),
-    setMarginManager: (id) => dispatch({ type: 'SET_MARGIN_MANAGER', payload: id }),
-    setGridOrderId: (id) => dispatch({ type: 'SET_GRID_ORDER_ID', payload: id }),
-    setSimulationMode: (mode) => dispatch({ type: 'SET_SIMULATION_MODE', payload: mode }),
+    ...actions,
     // Computed values
     currentPool,
     currentSignal,
     currentRisk,
     currentSocial,
-  }), [state, currentPool, currentSignal, currentRisk, currentSocial]);
+  }), [state, dispatch, actions, currentPool, currentSignal, currentRisk, currentSocial]);
 
   return (
     <SwipeBookContext.Provider value={value}>

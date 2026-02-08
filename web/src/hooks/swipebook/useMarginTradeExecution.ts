@@ -17,9 +17,13 @@ import {
   queryManagerState,
   findStaleDebtPool,
   queryTokenBalance,
+  queryPoolMidPrice,
 } from '@/lib/deepbook/margin-transactions';
-import { buildMarginTxWithPythRefresh } from '@/lib/deepbook/pyth-refresh';
+import { buildMarginTxWithPythRefresh, prependPythPriceUpdate } from '@/lib/deepbook/pyth-refresh';
+import { Transaction } from '@mysten/sui/transactions';
+import { bcs } from '@mysten/sui/bcs';
 import { getPool } from '@/lib/deepbook/pools';
+import { DUMMY_SENDER } from '@/lib/deepbook/config';
 
 interface OpenPositionParams {
   direction: 'long' | 'short';
@@ -33,6 +37,7 @@ interface ClosePositionParams {
   poolKey: string;
   quantity: number;
   isLong: boolean;
+  managerId: string; // on-chain manager object ID for fresh balance query
 }
 
 interface OpenLimitOrderParams {
@@ -122,18 +127,12 @@ export function useMarginTradeExecution(): UseMarginTradeReturn {
       }
 
       // ── Step 1: Handle stale debt ──
-      // Only attempt unwind if debt is in a DIFFERENT pool (cross-pool block).
-      // Same-pool debt is OK — borrow from the same margin pool will succeed
-      // (e.g., short+short both use base margin pool). If it's incompatible
-      // (e.g., existing base debt + new quote borrow), let the on-chain error
-      // tell us — the user needs to close their existing position first.
       if (stalePosition && stalePoolKey !== params.poolKey) {
         const staleManagerKey = `${stalePoolKey}_MGR`;
         console.log('[margin] Unwinding cross-pool stale debt (separate tx):', {
           pool: stalePoolKey, managerKey: staleManagerKey, state: stalePosition,
         });
 
-        // Query wallet base balance for hybrid unwind
         const stalePool = getPool(stalePoolKey);
         const staleWalletBase = stalePool
           ? await queryTokenBalance(suiClient, currentAccount.address, stalePool.baseType, stalePool.baseDecimals)
@@ -155,7 +154,6 @@ export function useMarginTradeExecution(): UseMarginTradeReturn {
         await suiClient.waitForTransaction({ digest: unwindDigest });
         await new Promise((r) => setTimeout(r, 2000));
 
-        // Verify debt cleared
         const postState = await queryManagerState(suiClient, marginClient, managerId!, stalePoolKey);
         console.log('[margin] Post-unwind state:', postState);
         if (postState && (postState.baseDebt > 0 || postState.quoteDebt > 0)) {
@@ -167,7 +165,6 @@ export function useMarginTradeExecution(): UseMarginTradeReturn {
         }
         console.log('[margin] Debt cleared, opening position...');
       } else if (stalePosition) {
-        // Same pool — check if the new direction is compatible.
         const existingIsShort = stalePosition.baseDebt > 0;
         const existingIsLong = stalePosition.quoteDebt > 0;
         const directionConflict =
@@ -175,12 +172,9 @@ export function useMarginTradeExecution(): UseMarginTradeReturn {
           (existingIsLong && params.direction === 'short');
 
         if (directionConflict) {
-          // Direction conflict: must unwind existing position first.
-          // Use hybrid approach: deposit available base from wallet + market buy.
           const existingDir = existingIsShort ? 'SHORT' : 'LONG';
           console.log(`[margin] Direction conflict — unwinding ${existingDir} before ${params.direction}:`, stalePosition);
 
-          // Query user's wallet base balance to cap depositBase
           const pool = getPool(params.poolKey);
           const walletBaseBalance = pool
             ? await queryTokenBalance(suiClient, currentAccount.address, pool.baseType, pool.baseDecimals)
@@ -215,19 +209,28 @@ export function useMarginTradeExecution(): UseMarginTradeReturn {
           }
           console.log('[margin] Position cleared, opening new trade...');
         } else {
-          // Same direction: proceed without unwind (stack positions).
           console.log('[margin] Same pool, compatible direction — proceeding:', stalePosition);
         }
       }
 
       // ── Step 2: Open new position ──
+      // Query actual pool mid-price for quantity calculation.
+      // The chart shows mainnet prices but trades execute on the current network
+      // (testnet), where prices can be very different (e.g. DEEP_SUI anchor = 1:1).
+      let tradingPrice = params.currentPrice;
+      try {
+        const poolMidPrice = await queryPoolMidPrice(suiClient, params.poolKey);
+        if (poolMidPrice > 0) tradingPrice = poolMidPrice;
+      } catch {
+        // Fall back to chart price if pool query fails
+      }
       const builder = params.direction === 'long'
         ? buildOpenLongOps(marginClient, {
             poolKey: params.poolKey,
             managerKey,
             collateral: params.collateral,
             leverage: params.leverage,
-            currentPrice: params.currentPrice,
+            currentPrice: tradingPrice,
             lotSize: bookParams.lotSize,
           })
         : buildOpenShortOps(marginClient, {
@@ -235,7 +238,7 @@ export function useMarginTradeExecution(): UseMarginTradeReturn {
             managerKey,
             collateral: params.collateral,
             leverage: params.leverage,
-            currentPrice: params.currentPrice,
+            currentPrice: tradingPrice,
             lotSize: bookParams.lotSize,
           });
 
@@ -268,14 +271,53 @@ export function useMarginTradeExecution(): UseMarginTradeReturn {
     setIsClosing(true);
     try {
       const managerKey = `${params.poolKey}_MGR`;
+      const pool = getPool(params.poolKey);
+      if (!pool) throw new Error(`Unknown pool: ${params.poolKey}`);
 
-      // Align close quantity to lot_size (on-chain balance may not be
-      // exactly lot-aligned due to rounding in devInspect parsing)
+      // Query FRESH on-chain balance via devInspect before closing.
+      // The passed-in quantity may be stale (React Query cache) or from
+      // the pre-calculated open amount (which differs from actual fill
+      // on partial-fill markets). Using stale/wrong quantity causes
+      // MoveAbort code 3 (EInsufficientBalance) in withdraw_with_proof.
+      let closeQuantity = params.quantity;
+      try {
+        const inspectTx = new Transaction();
+        inspectTx.setSenderIfNotSet(DUMMY_SENDER);
+        await prependPythPriceUpdate(inspectTx, params.poolKey);
+        marginClient.marginManager.managerState(params.poolKey, params.managerId)(inspectTx);
+
+        const inspectResult = await suiClient.devInspectTransactionBlock({
+          transactionBlock: inspectTx,
+          sender: DUMMY_SENDER,
+        });
+
+        const rv = inspectResult.results?.[inspectResult.results.length - 1]?.returnValues;
+        if (rv && rv.length >= 7) {
+          const parseU64 = (raw: [number[], string]): number => {
+            if (!raw || raw[1] !== 'u64') return 0;
+            return Number(bcs.u64().parse(new Uint8Array(raw[0])));
+          };
+          const baseAsset = parseU64(rv[3] as [number[], string]);
+          const baseDebt = parseU64(rv[5] as [number[], string]);
+          const baseScalar = Math.pow(10, pool.baseDecimals);
+          const freshBase = params.isLong
+            ? baseAsset / baseScalar
+            : baseDebt / baseScalar;
+          if (freshBase > 0) {
+            console.log(`[closePosition] fresh balance: ${freshBase}, passed: ${params.quantity}`);
+            closeQuantity = freshBase;
+          }
+        }
+      } catch (err) {
+        console.warn('[closePosition] fresh balance query failed, using passed quantity:', err);
+      }
+
+      // Align close quantity to lot_size
       const bookParams = await queryPoolBookParams(suiClient, params.poolKey);
       const lotSize = bookParams.lotSize;
       const alignedQuantity = lotSize > 0
-        ? Math.floor(params.quantity / lotSize) * lotSize
-        : params.quantity;
+        ? Math.floor(closeQuantity / lotSize) * lotSize
+        : closeQuantity;
 
       if (alignedQuantity <= 0) {
         throw new Error('Position too small to close');

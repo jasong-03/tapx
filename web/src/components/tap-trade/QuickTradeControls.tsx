@@ -20,9 +20,10 @@ interface QuickTradeControlsProps {
   quoteCoin: string;
   riskRatio?: number;
   marginPosition?: MarginPosition | null;
+  managerId?: string | null;
 }
 
-export function QuickTradeControls({ currentPrice, poolKey, stake, stakes, onStakeChange, quoteCoin, riskRatio, marginPosition }: QuickTradeControlsProps) {
+export function QuickTradeControls({ currentPrice, poolKey, stake, stakes, onStakeChange, quoteCoin, riskRatio, marginPosition, managerId }: QuickTradeControlsProps) {
   const {
     state,
     setQuickTradeState,
@@ -151,6 +152,7 @@ export function QuickTradeControls({ currentPrice, poolKey, stake, stakes, onSta
         poolKey: activePrediction.poolKey,
         quantity: onChainQuantity,
         isLong,
+        managerId: managerId ?? '',
       });
 
       const exitPrice = currentPrice;
@@ -204,6 +206,7 @@ export function QuickTradeControls({ currentPrice, poolKey, stake, stakes, onSta
         <StakeSelector stake={stake} stakes={stakes} onStakeChange={onStakeChange} />
         <LeverageSelector
           leverage={selectedLeverage}
+          poolKey={poolKey as import('@/lib/deepbook/margin-config').MarginPoolKey}
           onChange={setLeverage}
         />
       </div>
@@ -278,7 +281,7 @@ export function QuickTradeControls({ currentPrice, poolKey, stake, stakes, onSta
       {quickTradeState === 'result' && activePrediction && (
         <div className={`text-center py-2 rounded-xl ${activePrediction.result === 'win' ? 'bg-green-500/20' : 'bg-red-500/20'}`}>
           <div className={`text-2xl font-bold ${activePrediction.result === 'win' ? 'text-green-400' : 'text-red-400'}`}>
-            {activePrediction.pnl && activePrediction.pnl >= 0 ? '+' : ''}${activePrediction.pnl?.toFixed(2)}
+            {activePrediction.pnl && activePrediction.pnl >= 0 ? '+' : ''}${activePrediction.pnl ? (Math.abs(activePrediction.pnl) < 0.01 ? activePrediction.pnl.toFixed(4) : activePrediction.pnl.toFixed(2)) : '0.00'}
           </div>
           <div className="text-xs text-white/50">
             {activePrediction.pnlPercent?.toFixed(1)}% PnL

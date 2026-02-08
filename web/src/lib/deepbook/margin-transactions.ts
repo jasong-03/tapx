@@ -201,6 +201,11 @@ export function buildUnwindStalePositionOps(
   };
 }
 
+// Whitelisted pools (0 taker/maker fees) — no DEEP token needed for fees
+// All other pools charge fees; with payWithDeep:true they require DEEP
+// in the balance manager, which users typically don't have.
+const ZERO_FEE_POOLS = new Set(['DEEP_SUI', 'DEEP_DBUSDC']);
+
 interface OpenPositionOpsParams {
   poolKey: string;
   managerKey: string;
@@ -231,6 +236,54 @@ interface CancelOrderOpsParams {
   poolKey: string;
   managerKey: string;
   orderId: string;
+}
+
+/**
+ * Query the actual mid-price from the pool's L2 orderbook via devInspect.
+ * Used to get the real trading price (critical on testnet where prices
+ * differ from mainnet display prices).
+ */
+const midPriceCache = new Map<string, { price: number; ts: number }>();
+
+export async function queryPoolMidPrice(
+  client: SuiJsonRpcClient,
+  poolKey: string,
+): Promise<number> {
+  // Cache for 5 seconds to avoid spamming RPC
+  const cached = midPriceCache.get(poolKey);
+  if (cached && Date.now() - cached.ts < 5000) return cached.price;
+
+  const pool = getPool(poolKey);
+  if (!pool) throw new Error(`Unknown pool: ${poolKey}`);
+
+  const { Transaction: TxClass } = await import('@mysten/sui/transactions');
+  const tx = new TxClass();
+  tx.moveCall({
+    target: `${DEEPBOOK_PACKAGE_ID}::pool::mid_price`,
+    typeArguments: [pool.baseType, pool.quoteType],
+    arguments: [
+      tx.object(pool.address),
+      tx.object('0x6'),
+    ],
+  });
+
+  const result = await client.devInspectTransactionBlock({
+    transactionBlock: tx,
+    sender: DUMMY_SENDER,
+  });
+
+  const rv = result.results?.[0]?.returnValues;
+  if (!rv || rv.length < 1) throw new Error(`Failed to query mid price for ${poolKey}`);
+
+  const priceRaw = Number(bcs.u64().parse(new Uint8Array(rv[0][0])));
+  const priceScale = Math.pow(10, pool.baseDecimals - pool.quoteDecimals);
+  const price = (priceRaw / 1e9) * priceScale;
+
+  if (price > 0) {
+    midPriceCache.set(poolKey, { price, ts: Date.now() });
+  }
+
+  return price;
 }
 
 let orderCounter = 0;
@@ -372,7 +425,7 @@ export function buildOpenLongOps(
       clientOrderId: nextClientOrderId(),
       isBid: true,
       quantity: baseQuantity,
-      payWithDeep: true,
+      payWithDeep: ZERO_FEE_POOLS.has(params.poolKey),
     })(tx);
   };
 
@@ -420,7 +473,7 @@ export function buildOpenShortOps(
       clientOrderId: nextClientOrderId(),
       isBid: false,
       quantity: borrowBase,
-      payWithDeep: true,
+      payWithDeep: ZERO_FEE_POOLS.has(params.poolKey),
     })(tx);
   };
 
@@ -450,7 +503,7 @@ export function buildClosePositionOps(
       clientOrderId: nextClientOrderId(),
       isBid: !params.isLong, // reverse to close
       quantity: params.quantity,
-      payWithDeep: true,
+      payWithDeep: ZERO_FEE_POOLS.has(params.poolKey),
     })(tx);
 
     // 2. Repay borrowed amounts (omit amount to repay all)
@@ -513,7 +566,7 @@ export function buildMarginLimitOrderOps(
       isBid: params.direction === 'long',
       price: params.targetPrice,
       quantity: baseQuantity,
-      payWithDeep: true,
+      payWithDeep: ZERO_FEE_POOLS.has(params.poolKey),
     })(tx);
   };
 }
