@@ -1,89 +1,287 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { ArrowUp, ArrowDown } from 'lucide-react';
 import { useSwipeBook } from '@/context/SwipeBookContext';
 import { useMarginTradeExecution } from '@/hooks/swipebook/useMarginTradeExecution';
-import { UpDownButtons } from './UpDownButtons';
-import { LeverageSelector } from './LeverageSelector';
-import { TimeframeSelector } from './TimeframeSelector';
-import { MarginHealthGauge } from './MarginHealthGauge';
+import {
+  TARGET_PERCENT_OPTIONS,
+  LEVERAGE_OPTIONS,
+  TIMEFRAME_OPTIONS,
+  MARGIN_POOL_KEYS,
+  calculateTPSLPrices,
+} from '@/lib/deepbook/margin-config';
+import { CountdownRing } from './CountdownRing';
 import type { PredictionDirection, PredictionRound } from '@/context/SwipeBookContext';
 import type { MarginPosition } from '@/hooks/swipebook/useMarginPosition';
+import type { MarginManager } from '@mysten/deepbook-v3';
 
 interface QuickTradeControlsProps {
   currentPrice: number | null;
   poolKey: string;
   stake: number;
+  stakes: number[];
+  onStakeChange: (stake: number) => void;
+  marginManagers: Record<string, MarginManager>;
   riskRatio?: number;
   marginPosition?: MarginPosition | null;
 }
 
-export function QuickTradeControls({ currentPrice, poolKey, stake, riskRatio, marginPosition }: QuickTradeControlsProps) {
+export function QuickTradeControls({
+  currentPrice,
+  poolKey,
+  stake,
+  stakes,
+  onStakeChange,
+  marginManagers,
+  riskRatio,
+  marginPosition,
+}: QuickTradeControlsProps) {
   const {
     state,
     setQuickTradeState,
     setActivePrediction,
-    setTimeframe,
+    setTargetPercent,
     setLeverage,
+    setTimeframe,
     addRound,
   } = useSwipeBook();
 
   const {
     quickTradeState,
     activePrediction,
-    selectedTimeframe,
+    selectedTargetPercent,
     selectedLeverage,
+    selectedTimeframe,
     predictionMode,
   } = state;
 
-  const { openPosition, closePosition } = useMarginTradeExecution();
-  const closeTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const [timerExpired, setTimerExpired] = useState(false);
-  const [closeError, setCloseError] = useState<string | null>(null);
+  const { openPositionWithTPSL, settleTPSL, closeEarly, forceRepay } = useMarginTradeExecution(marginManagers);
+  const currentPriceRef = useRef(currentPrice);
+  currentPriceRef.current = currentPrice;
 
-  // Auto-close when timer expires (only once — no retry loop)
+  // Live PnL calculation during watching phase
+  const [livePnl, setLivePnl] = useState<{ amount: number; percent: number } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [isRepaying, setIsRepaying] = useState(false);
+  const [hasStuckPosition, setHasStuckPosition] = useState(false);
+
+  // Calculate live PnL
   useEffect(() => {
-    if (quickTradeState !== 'watching' || !activePrediction) return;
-
-    const elapsed = Date.now() - activePrediction.startedAt;
-    const remaining = activePrediction.timeframe * 1000 - elapsed;
-
-    if (remaining <= 0) {
-      setTimerExpired(true);
-      // Don't auto-call handleClose — let user click the button
-      // This avoids infinite loop on wallet rejection
+    if ((quickTradeState !== 'watching' && quickTradeState !== 'triggered') || !activePrediction || !currentPrice) {
+      setLivePnl(null);
       return;
     }
+    const priceDiff = currentPrice - activePrediction.entryPrice;
+    const pnl = activePrediction.direction === 'long'
+      ? priceDiff * activePrediction.collateral * activePrediction.leverage / activePrediction.entryPrice
+      : -priceDiff * activePrediction.collateral * activePrediction.leverage / activePrediction.entryPrice;
+    const pnlPercent = (pnl / activePrediction.collateral) * 100;
+    setLivePnl({ amount: pnl, percent: pnlPercent });
+  }, [quickTradeState, activePrediction, currentPrice]);
 
-    closeTimerRef.current = setTimeout(() => {
-      setTimerExpired(true);
-    }, remaining);
-
-    return () => {
-      if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
-    };
-  }, [quickTradeState, activePrediction]);
-
-  // Reset state when prediction changes (new round)
+  // Reset error when prediction clears
   useEffect(() => {
     if (!activePrediction) {
-      setTimerExpired(false);
-      setCloseError(null);
+      setError(null);
     }
   }, [activePrediction]);
 
+  // ── Trigger detection: compare live price against TP/SL ──
+  useEffect(() => {
+    if (quickTradeState !== 'watching' || !activePrediction || !currentPrice) return;
+    if (!activePrediction.tpPrice || !activePrediction.slPrice) return;
+
+    const isLong = activePrediction.direction === 'long';
+    let triggered: 'tp' | 'sl' | null = null;
+
+    if (isLong) {
+      if (currentPrice >= activePrediction.tpPrice) triggered = 'tp';
+      else if (currentPrice <= activePrediction.slPrice) triggered = 'sl';
+    } else {
+      if (currentPrice <= activePrediction.tpPrice) triggered = 'tp';
+      else if (currentPrice >= activePrediction.slPrice) triggered = 'sl';
+    }
+
+    if (triggered) {
+      setActivePrediction({ ...activePrediction, triggeredSide: triggered });
+      setQuickTradeState('triggered');
+    }
+  }, [quickTradeState, activePrediction, currentPrice, setActivePrediction, setQuickTradeState]);
+
+  // ── Auto-close on timer expiry ──
+  const autoCloseRef = useRef(false);
+  // Only reset when returning to idle (new round), NOT on closing/settling/triggered
+  useEffect(() => {
+    if (quickTradeState === 'idle') {
+      autoCloseRef.current = false;
+    }
+  }, [quickTradeState]);
+
+  useEffect(() => {
+    if (quickTradeState !== 'watching' || !activePrediction || autoCloseRef.current) {
+      return;
+    }
+    const elapsed = (Date.now() - activePrediction.startedAt) / 1000;
+    const remaining = activePrediction.timeframe - elapsed;
+    if (remaining <= 0) {
+      autoCloseRef.current = true;
+      handleCloseEarly();
+      return;
+    }
+    const timer = setTimeout(() => {
+      if (autoCloseRef.current) return;
+      autoCloseRef.current = true;
+      handleCloseEarly();
+    }, remaining * 1000);
+    return () => clearTimeout(timer);
+  }, [quickTradeState, activePrediction]); // handleCloseEarly added below after definition
+
+  // ── Settle: execute conditional orders + repay + withdraw ──
+  const handleSettle = useCallback(async () => {
+    if (!activePrediction) return;
+    setError(null);
+    setQuickTradeState('settling');
+
+    try {
+      const digest = await settleTPSL({
+        poolKey: activePrediction.poolKey ?? poolKey,
+        isLong: activePrediction.direction === 'long',
+      });
+
+      // Use the TP/SL trigger price as exit price (not current market price which may have bounced)
+      const isWin = activePrediction.triggeredSide === 'tp';
+      const exitPrice = isWin
+        ? (activePrediction.tpPrice ?? currentPriceRef.current ?? activePrediction.entryPrice)
+        : (activePrediction.slPrice ?? currentPriceRef.current ?? activePrediction.entryPrice);
+      const priceDiff = exitPrice - activePrediction.entryPrice;
+      const pnl = activePrediction.direction === 'long'
+        ? priceDiff * activePrediction.collateral * activePrediction.leverage / activePrediction.entryPrice
+        : -priceDiff * activePrediction.collateral * activePrediction.leverage / activePrediction.entryPrice;
+      const pnlPercent = (pnl / activePrediction.collateral) * 100;
+      const completedRound: PredictionRound = {
+        ...activePrediction,
+        exitPrice,
+        closedAt: Date.now(),
+        pnl,
+        pnlPercent,
+        txDigestClose: digest,
+        result: isWin ? 'win' : 'loss',
+      };
+
+      setActivePrediction(completedRound);
+      addRound(completedRound);
+      setQuickTradeState('result');
+
+      setTimeout(() => {
+        setActivePrediction(null);
+        setQuickTradeState('idle');
+      }, 3000);
+    } catch (err) {
+      console.error('[QuickTrade] settle failed:', err);
+      setError(err instanceof Error ? err.message : 'Failed to settle position');
+      setQuickTradeState('triggered'); // Stay in triggered so user can retry
+    }
+  }, [activePrediction, poolKey, settleTPSL, setQuickTradeState, setActivePrediction, addRound]);
+
+  // ── Close early: cancel conditionals + reduce-only + repay ──
+  const handleCloseEarly = useCallback(async () => {
+    if (!activePrediction) return;
+    setError(null);
+    setQuickTradeState('closing');
+
+    try {
+      const exitPrice = currentPriceRef.current ?? activePrediction.entryPrice;
+      const digest = await closeEarly({
+        poolKey: activePrediction.poolKey ?? poolKey,
+        quantity: activePrediction.baseQuantity,
+        isLong: activePrediction.direction === 'long',
+        currentPrice: exitPrice,
+      });
+
+      const priceDiff = exitPrice - activePrediction.entryPrice;
+      const pnl = activePrediction.direction === 'long'
+        ? priceDiff * activePrediction.collateral * activePrediction.leverage / activePrediction.entryPrice
+        : -priceDiff * activePrediction.collateral * activePrediction.leverage / activePrediction.entryPrice;
+      const pnlPercent = (pnl / activePrediction.collateral) * 100;
+
+      const completedRound: PredictionRound = {
+        ...activePrediction,
+        exitPrice,
+        closedAt: Date.now(),
+        pnl,
+        pnlPercent,
+        txDigestClose: digest,
+        result: pnl > 0 ? 'win' : 'loss',
+      };
+
+      setActivePrediction(completedRound);
+      addRound(completedRound);
+      setQuickTradeState('result');
+
+      setTimeout(() => {
+        setActivePrediction(null);
+        setQuickTradeState('idle');
+      }, 3000);
+    } catch (err) {
+      console.error('[QuickTrade] close early failed:', err);
+      setError(err instanceof Error ? err.message : 'Failed to close position');
+      setQuickTradeState('watching'); // Stay in watching so user can retry
+    }
+  }, [activePrediction, poolKey, closeEarly, setQuickTradeState, setActivePrediction, addRound]);
+
+  // Force-repay all debt across all known margin pools to clear error 4
+  const handleForceRepay = useCallback(async () => {
+    setIsRepaying(true);
+    setError(null);
+    let anySuccess = false;
+    try {
+      for (const pk of MARGIN_POOL_KEYS) {
+        const mgrKey = `${pk}_MGR`;
+        if (!marginManagers[mgrKey]) continue;
+        try {
+          await forceRepay(pk);
+          anySuccess = true;
+        } catch {
+          // Some pools may not have debt
+        }
+      }
+      if (anySuccess) {
+        setHasStuckPosition(false);
+        setError(null);
+      } else {
+        setError('No positions found to close.');
+      }
+    } catch {
+      setError('Failed to clear position. Try again.');
+    } finally {
+      setIsRepaying(false);
+    }
+  }, [marginManagers, forceRepay]);
+
+  // ── Open position with TP/SL ──
   const handleDirection = useCallback(async (direction: PredictionDirection) => {
     if (quickTradeState !== 'idle' || !currentPrice || predictionMode !== 'quick') return;
+
+    const targetOption = TARGET_PERCENT_OPTIONS.find(o => o.value === selectedTargetPercent)!;
+    const { tpPrice, slPrice } = calculateTPSLPrices(
+      currentPrice,
+      direction,
+      targetOption.value,
+      targetOption.slPercent,
+    );
 
     setQuickTradeState('opening');
 
     try {
-      const result = await openPosition({
+      const result = await openPositionWithTPSL({
         direction,
         poolKey,
         collateral: stake,
         leverage: selectedLeverage,
         currentPrice,
+        tpPrice,
+        slPrice,
       });
 
       const round: PredictionRound = {
@@ -97,167 +295,325 @@ export function QuickTradeControls({ currentPrice, poolKey, stake, riskRatio, ma
         timeframe: selectedTimeframe,
         startedAt: Date.now(),
         txDigestOpen: result.digest,
+        tpPrice,
+        slPrice,
+        tpOrderId: result.tpOrderId,
+        slOrderId: result.slOrderId,
+        targetPercent: selectedTargetPercent,
       };
 
       setActivePrediction(round);
       setQuickTradeState('watching');
     } catch (err) {
       console.error('Failed to open position:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('Insufficient') && msg.includes('balance')) {
+        // Friendly insufficient balance warning
+        setError(msg);
+      } else if (msg.includes('"margin_manager"') && msg.includes(', 4)')) {
+        setError('Existing position open. Close it first before trading.');
+        setHasStuckPosition(true);
+      } else if (msg.includes('InsufficientCoinBalance')) {
+        setError('Not enough funds in wallet. Deposit more tokens to trade.');
+      } else {
+        setError(msg.length > 120 ? msg.slice(0, 120) + '...' : msg);
+      }
       setQuickTradeState('idle');
     }
-  }, [quickTradeState, currentPrice, predictionMode, poolKey, stake, selectedLeverage, selectedTimeframe, openPosition, setQuickTradeState, setActivePrediction]);
-
-  const handleClose = useCallback(async () => {
-    if (!activePrediction || !currentPrice) return;
-
-    setQuickTradeState('closing');
-    setCloseError(null);
-
-    try {
-      // Use real on-chain position balance instead of stored baseQuantity.
-      // Market orders can partial-fill, so the actual position may differ
-      // from the requested quantity. Using the stale baseQuantity causes
-      // MoveAbort code 3 (reduce-only quantity exceeds position).
-      const isLong = activePrediction.direction === 'long';
-      const onChainQuantity = marginPosition
-        ? (isLong ? marginPosition.baseBalance : marginPosition.baseDebt)
-        : activePrediction.baseQuantity;
-
-      const result = await closePosition({
-        poolKey: activePrediction.poolKey,
-        quantity: onChainQuantity,
-        isLong,
-      });
-
-      const exitPrice = currentPrice;
-      const priceDiff = exitPrice - activePrediction.entryPrice;
-      const pnl = activePrediction.direction === 'long'
-        ? priceDiff * activePrediction.collateral * activePrediction.leverage / activePrediction.entryPrice
-        : -priceDiff * activePrediction.collateral * activePrediction.leverage / activePrediction.entryPrice;
-      const pnlPercent = (pnl / activePrediction.collateral) * 100;
-
-      const completedRound: PredictionRound = {
-        ...activePrediction,
-        exitPrice,
-        closedAt: Date.now(),
-        pnl,
-        pnlPercent,
-        txDigestClose: result.digest,
-        result: pnl > 0 ? 'win' : 'loss',
-      };
-
-      setActivePrediction(completedRound);
-      addRound(completedRound);
-      setQuickTradeState('result');
-
-      // Auto-reset to idle after 3s
-      setTimeout(() => {
-        setActivePrediction(null);
-        setQuickTradeState('idle');
-      }, 3000);
-    } catch (err) {
-      console.error('Failed to close position:', err);
-      setCloseError(err instanceof Error ? err.message : 'Close failed');
-      setQuickTradeState('watching'); // Go back to watching — user can retry manually
-    }
-  }, [activePrediction, currentPrice, marginPosition, closePosition, setQuickTradeState, setActivePrediction, addRound]);
+  }, [quickTradeState, currentPrice, predictionMode, poolKey, stake, selectedLeverage, selectedTargetPercent, selectedTimeframe, openPositionWithTPSL, setQuickTradeState, setActivePrediction]);
 
   const isDisabled = quickTradeState !== 'idle' || !currentPrice;
-  const isActive = quickTradeState === 'watching' || quickTradeState === 'closing';
+  const isOpening = quickTradeState === 'opening';
 
-  // Calculate remaining time for display
-  const remaining = activePrediction
-    ? Math.max(0, activePrediction.timeframe - (Date.now() - activePrediction.startedAt) / 1000)
-    : 0;
-
-  return (
-    <div className="flex flex-col gap-3 p-4">
-      {/* Selectors row */}
-      <div className="flex items-center justify-between">
-        <TimeframeSelector
-          timeframe={selectedTimeframe}
-          onChange={setTimeframe}
-        />
-        <LeverageSelector
-          leverage={selectedLeverage}
-          onChange={setLeverage}
-        />
+  // ─── SETTLING STATE: Wallet signature pending ──────────────────────
+  if (quickTradeState === 'settling' && activePrediction) {
+    return (
+      <div className="flex flex-col items-center gap-3 px-4 py-6">
+        <div className="w-8 h-8 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin" />
+        <div className="text-sm font-bold text-white">Settling position...</div>
+        <div className="text-[10px] text-white/40">Approve the transaction in your wallet</div>
       </div>
+    );
+  }
 
-      {/* Status row (during active trade) */}
-      {isActive && activePrediction && (
-        <div className="flex items-center justify-between px-2">
-          <div className="flex items-center gap-2">
-            <span className={`text-sm font-bold ${activePrediction.direction === 'long' ? 'text-green-400' : 'text-red-400'}`}>
-              {activePrediction.direction.toUpperCase()} {activePrediction.leverage}x
+  // ─── CLOSING STATE: Early close in progress ────────────────────────
+  if (quickTradeState === 'closing' && activePrediction) {
+    return (
+      <div className="flex flex-col items-center gap-3 px-4 py-6">
+        <div className="w-8 h-8 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin" />
+        <div className="text-sm font-bold text-white">Closing position...</div>
+        <div className="text-[10px] text-white/40">Approve the transaction in your wallet</div>
+      </div>
+    );
+  }
+
+  // ─── TRIGGERED STATE: TP or SL hit, show Claim button ──────────────
+  if (quickTradeState === 'triggered' && activePrediction) {
+    const isTP = activePrediction.triggeredSide === 'tp';
+    const isLong = activePrediction.direction === 'long';
+
+    return (
+      <div className="flex flex-col gap-3 px-4 py-3">
+        {/* Trigger banner */}
+        <div className={`text-center py-2 rounded-xl font-bold text-lg ${
+          isTP ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
+        }`}>
+          {isTP ? 'Take Profit Hit!' : 'Stop Loss Hit!'}
+        </div>
+
+        {/* Position summary */}
+        <div className="flex items-center justify-between text-xs">
+          <span className="text-white/50">
+            {isLong ? 'LONG' : 'SHORT'} {activePrediction.leverage}x
+          </span>
+          {livePnl && (
+            <span className={livePnl.amount >= 0 ? 'text-green-400' : 'text-red-400'}>
+              {livePnl.amount >= 0 ? '+' : ''}{livePnl.percent.toFixed(1)}%
             </span>
-            <span className="text-xs text-white/40">
+          )}
+        </div>
+
+        {/* Error */}
+        {error && (
+          <div className="text-[10px] text-red-400 text-center">{error}</div>
+        )}
+
+        {/* Claim / Settle button */}
+        <button
+          onClick={handleSettle}
+          className={`w-full py-3 rounded-xl font-bold text-base transition-all ${
+            isTP
+              ? 'bg-gradient-to-r from-green-600 to-green-500 text-black hover:from-green-500 hover:to-green-400'
+              : 'bg-gradient-to-r from-red-600 to-red-500 text-white hover:from-red-500 hover:to-red-400'
+          } animate-pulse`}
+        >
+          {isTP ? 'Claim Win' : 'Settle Loss'}
+        </button>
+      </div>
+    );
+  }
+
+  // ─── WATCHING STATE: Live position with TP/SL lines + countdown ────
+  if (quickTradeState === 'watching' && activePrediction) {
+    const isLong = activePrediction.direction === 'long';
+    const isProfitable = livePnl ? livePnl.amount > 0 : false;
+
+    return (
+      <div className="flex flex-col gap-2 px-3 sm:px-4 py-2 sm:py-3">
+        {/* Top: Position info + Countdown + Live PnL */}
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className={`text-[11px] sm:text-xs font-bold px-2 py-1 rounded-full shrink-0 ${
+              isLong ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
+            }`}>
+              {isLong ? '↑' : '↓'} {activePrediction.leverage}x
+            </span>
+            <span className="text-[10px] text-white/40 font-mono truncate">
               @ ${activePrediction.entryPrice.toFixed(4)}
             </span>
           </div>
-          <div className="text-right">
-            <span className="text-sm font-mono text-white/80">
-              {timerExpired ? 'Expired' : `${Math.ceil(remaining)}s`}
-            </span>
+          <div className="flex items-center gap-2 shrink-0">
+            <CountdownRing
+              duration={activePrediction.timeframe}
+              startedAt={activePrediction.startedAt}
+              size={44}
+            />
+            {livePnl && (
+              <div className={`text-right ${isProfitable ? 'text-green-400' : 'text-red-400'}`}>
+                <div className="text-base sm:text-lg font-black tabular-nums">
+                  {livePnl.percent >= 0 ? '+' : ''}{livePnl.percent.toFixed(1)}%
+                </div>
+              </div>
+            )}
           </div>
         </div>
-      )}
 
-      {/* Close error message */}
-      {closeError && isActive && (
-        <div className="text-center text-xs text-red-400/80 px-2">
-          Close failed — approve wallet to close position
+        {/* TP/SL price targets */}
+        <div className="flex items-center justify-between text-[10px] font-mono">
+          <span className="text-green-400/70">
+            TP: ${activePrediction.tpPrice?.toFixed(4)}
+          </span>
+          <span className="text-white/30">|</span>
+          <span className="text-red-400/70">
+            SL: ${activePrediction.slPrice?.toFixed(4)}
+          </span>
         </div>
-      )}
 
-      {/* Result display */}
-      {quickTradeState === 'result' && activePrediction && (
-        <div className={`text-center py-2 rounded-xl ${activePrediction.result === 'win' ? 'bg-green-500/20' : 'bg-red-500/20'}`}>
-          <div className={`text-2xl font-bold ${activePrediction.result === 'win' ? 'text-green-400' : 'text-red-400'}`}>
-            {activePrediction.pnl && activePrediction.pnl >= 0 ? '+' : ''}${activePrediction.pnl?.toFixed(2)}
-          </div>
-          <div className="text-xs text-white/50">
-            {activePrediction.pnlPercent?.toFixed(1)}% PnL
-          </div>
-        </div>
-      )}
+        {/* Error */}
+        {error && (
+          <div className="text-[10px] text-red-400 text-center">{error}</div>
+        )}
 
-      {/* UP/DOWN buttons */}
-      <UpDownButtons
-        onUp={() => handleDirection('long')}
-        onDown={() => handleDirection('short')}
-        disabled={isDisabled}
-        isActive={isActive}
-        activeDirection={activePrediction?.direction}
-      />
-
-      {/* Health gauge during active position */}
-      {isActive && (
-        <div className="flex justify-center">
-          <MarginHealthGauge riskRatio={riskRatio ?? 2.0} visible={true} />
-        </div>
-      )}
-
-      {/* Close position button — shown when timer expired or user wants to close early */}
-      {quickTradeState === 'watching' && (
+        {/* Close Early button */}
         <button
-          onClick={handleClose}
-          className={`w-full py-2.5 rounded-xl text-sm font-medium transition-colors ${
-            timerExpired
-              ? 'bg-yellow-500/20 text-yellow-300 hover:bg-yellow-500/30 border border-yellow-500/30'
-              : 'bg-white/10 text-white/70 hover:bg-white/15'
-          }`}
+          onClick={handleCloseEarly}
+          className="w-full py-2 rounded-xl text-sm font-bold bg-white/5 text-white/60 border border-white/10 hover:bg-white/10 hover:text-white/80 transition-all active:scale-95"
         >
-          {timerExpired ? 'Close Position (Approve Wallet)' : 'Close Early'}
+          Close Early
         </button>
-      )}
+      </div>
+    );
+  }
 
-      {/* Show loading state during close */}
-      {quickTradeState === 'closing' && (
-        <div className="w-full py-2.5 rounded-xl bg-white/5 text-white/50 text-sm font-medium text-center">
-          Closing position...
+  // ─── Computed multiplier ──────────────────────────────────────────
+  const targetOption = TARGET_PERCENT_OPTIONS.find(o => o.value === selectedTargetPercent);
+  const potentialMultiplier = targetOption
+    ? (selectedLeverage * targetOption.value / 100 + 1).toFixed(1)
+    : '1.0';
+
+  // ─── IDLE STATE: Selectors + UP/DOWN ───────────────────────────────
+  return (
+    <div className="flex flex-col gap-2 sm:gap-3 px-3 sm:px-4 py-2 sm:py-3">
+      {/* Error banner with force-repay option */}
+      {error && quickTradeState === 'idle' && (
+        <div className="flex flex-col gap-2 bg-red-500/10 border border-red-500/20 rounded-xl px-3 py-2">
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] text-red-400">{error}</span>
+            <button onClick={() => { setError(null); setHasStuckPosition(false); }} className="text-red-400/60 hover:text-red-400 text-xs ml-2">✕</button>
+          </div>
+          {hasStuckPosition && (
+            <button
+              onClick={handleForceRepay}
+              disabled={isRepaying}
+              className="w-full py-2 rounded-lg text-xs font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30 hover:bg-amber-500/30 disabled:opacity-50"
+            >
+              {isRepaying ? 'Clearing position...' : 'Close Existing Position & Repay Debt'}
+            </button>
+          )}
         </div>
       )}
+
+      {/* Row 1: Target % + Leverage */}
+      <div className="flex items-center justify-between gap-1">
+        {/* Target percent */}
+        <div className="flex gap-0.5 sm:gap-1 overflow-x-auto no-scrollbar">
+          {TARGET_PERCENT_OPTIONS.map((opt) => (
+            <button
+              key={opt.value}
+              onClick={() => setTargetPercent(opt.value)}
+              disabled={isOpening}
+              className={`
+                px-2 sm:px-3 py-1 sm:py-1.5 rounded-full text-[11px] sm:text-xs font-bold transition-all shrink-0
+                ${selectedTargetPercent === opt.value
+                  ? 'bg-white/15 text-white border border-white/25'
+                  : 'text-white/40 hover:text-white/60'
+                }
+              `}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Leverage */}
+        <div className="flex gap-0.5 sm:gap-1 shrink-0">
+          {LEVERAGE_OPTIONS.map((opt) => (
+            <button
+              key={opt.value}
+              onClick={() => setLeverage(opt.value)}
+              disabled={isOpening}
+              className={`
+                px-2 sm:px-3 py-1 sm:py-1.5 rounded-full text-[11px] sm:text-xs font-bold transition-all
+                ${selectedLeverage === opt.value
+                  ? 'bg-lime-400 text-black shadow-[0_0_12px_rgba(163,230,53,0.3)]'
+                  : 'text-white/40 hover:text-white/60'
+                }
+              `}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Row 2: Duration + Stake */}
+      <div className="flex items-center justify-between gap-2">
+        {/* Duration selector */}
+        <div className="flex gap-0.5 sm:gap-1">
+          {TIMEFRAME_OPTIONS.map((opt) => (
+            <button
+              key={opt.value}
+              onClick={() => setTimeframe(opt.value)}
+              disabled={isOpening}
+              className={`
+                px-2 sm:px-3 py-1 sm:py-1.5 rounded-full text-[11px] sm:text-xs font-bold transition-all
+                ${selectedTimeframe === opt.value
+                  ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30'
+                  : 'text-white/40 hover:text-white/60'
+                }
+              `}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Stake selector */}
+        <div className="flex gap-0.5 sm:gap-1">
+          {stakes.map((s) => (
+            <button
+              key={s}
+              onClick={() => onStakeChange(s)}
+              disabled={isOpening}
+              className={`
+                px-2.5 sm:px-3.5 py-1 sm:py-1.5 rounded-full text-[11px] sm:text-xs font-bold transition-all
+                ${stake === s
+                  ? 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/30'
+                  : 'text-white/40 hover:text-white/60 border border-transparent'
+                }
+              `}
+            >
+              ${s}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Multiplier display */}
+      <div className="text-center">
+        <span className="text-[11px] text-white/40">Potential: </span>
+        <span className="text-sm font-black text-lime-400">{potentialMultiplier}x</span>
+        <span className="text-[10px] text-white/30 ml-1">({selectedTimeframe}s)</span>
+      </div>
+
+      {/* Row 3: LONG / SHORT buttons */}
+      <div className="flex gap-2 sm:gap-3 w-full">
+        <button
+          onClick={() => handleDirection('long')}
+          disabled={isDisabled || isOpening}
+          className={`
+            flex-1 flex items-center justify-center gap-1.5 py-3 sm:py-4 rounded-2xl
+            font-bold text-base sm:text-lg transition-all duration-200
+            ${isDisabled || isOpening
+              ? 'opacity-40 cursor-not-allowed'
+              : 'active:scale-95'
+            }
+            bg-gradient-to-r from-green-600 to-green-500 text-black
+            hover:from-green-500 hover:to-green-400 shadow-lg
+          `}
+        >
+          <ArrowUp className="w-5 h-5 sm:w-6 sm:h-6" />
+          <span>{isOpening ? 'Opening...' : 'LONG'}</span>
+        </button>
+
+        <button
+          onClick={() => handleDirection('short')}
+          disabled={isDisabled || isOpening}
+          className={`
+            flex-1 flex items-center justify-center gap-1.5 py-3 sm:py-4 rounded-2xl
+            font-bold text-base sm:text-lg transition-all duration-200
+            ${isDisabled || isOpening
+              ? 'opacity-40 cursor-not-allowed'
+              : 'active:scale-95'
+            }
+            bg-gradient-to-r from-red-600 to-red-500 text-white
+            hover:from-red-500 hover:to-red-400 shadow-lg
+          `}
+        >
+          <ArrowDown className="w-5 h-5 sm:w-6 sm:h-6" />
+          <span>{isOpening ? 'Opening...' : 'SHORT'}</span>
+        </button>
+      </div>
     </div>
   );
 }

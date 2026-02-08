@@ -113,6 +113,7 @@ export function useMarginClient(marginManagers?: Record<string, { address: strin
       core: { value: patchedCore, enumerable: true },
     });
 
+    console.log('[useMarginClient] creating DeepBookClient with marginManagers:', JSON.stringify(marginManagers));
     return new DeepBookClient({
       client: patchedClient,
       address: currentAccount.address,
