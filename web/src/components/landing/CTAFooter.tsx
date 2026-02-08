@@ -33,14 +33,6 @@ export function CTAFooter() {
           >
             <Link href="/swipebook">Launch App</Link>
           </Button>
-          <Button
-            asChild
-            size="lg"
-            variant="outline"
-            className="border-white/10 text-muted-foreground hover:bg-white/5 text-base px-8 py-3 h-auto"
-          >
-            <Link href="/vault">Vault Management</Link>
-          </Button>
         </div>
 
         <p className="mt-8 text-xs text-muted-foreground/60">
