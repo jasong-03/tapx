@@ -195,14 +195,17 @@ function swipeBookReducer(state: ExtendedSwipeBookState, action: ExtendedSwipeBo
       };
     // Margin/prediction reducers
     case 'SET_QUICK_TRADE_STATE':
+      if (state.quickTradeState === action.payload) return state;
       return { ...state, quickTradeState: action.payload };
     case 'SET_ACTIVE_PREDICTION':
+      if (state.activePrediction === action.payload) return state;
       return { ...state, activePrediction: action.payload };
     case 'SET_TIMEFRAME':
       return { ...state, selectedTimeframe: action.payload };
     case 'SET_LEVERAGE':
       return { ...state, selectedLeverage: action.payload };
     case 'SET_PREDICTION_MODE':
+      if (state.predictionMode === action.payload) return state;
       return { ...state, predictionMode: action.payload };
     case 'ADD_ROUND': {
       const history = [action.payload, ...state.roundHistory].slice(0, 50);

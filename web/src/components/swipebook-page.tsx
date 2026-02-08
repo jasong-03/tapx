@@ -428,6 +428,9 @@ function TapTradeContent() {
                 currentPrice={currentPrice}
                 poolKey={selectedPool.poolKey}
                 stake={stake}
+                stakes={STAKES}
+                onStakeChange={setStake}
+                quoteCoin={selectedPool.quoteCoin}
                 riskRatio={marginPosition?.riskRatio}
                 marginPosition={marginPosition}
               />

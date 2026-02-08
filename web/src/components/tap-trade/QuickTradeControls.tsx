@@ -6,6 +6,7 @@ import { useMarginTradeExecution } from '@/hooks/swipebook/useMarginTradeExecuti
 import { UpDownButtons } from './UpDownButtons';
 import { LeverageSelector } from './LeverageSelector';
 import { TimeframeSelector } from './TimeframeSelector';
+import { StakeSelector } from './stake-selector';
 import { MarginHealthGauge } from './MarginHealthGauge';
 import type { PredictionDirection, PredictionRound } from '@/context/SwipeBookContext';
 import type { MarginPosition } from '@/hooks/swipebook/useMarginPosition';
@@ -14,11 +15,14 @@ interface QuickTradeControlsProps {
   currentPrice: number | null;
   poolKey: string;
   stake: number;
+  stakes: number[];
+  onStakeChange: (stake: number) => void;
+  quoteCoin: string;
   riskRatio?: number;
   marginPosition?: MarginPosition | null;
 }
 
-export function QuickTradeControls({ currentPrice, poolKey, stake, riskRatio, marginPosition }: QuickTradeControlsProps) {
+export function QuickTradeControls({ currentPrice, poolKey, stake, stakes, onStakeChange, quoteCoin, riskRatio, marginPosition }: QuickTradeControlsProps) {
   const {
     state,
     setQuickTradeState,
@@ -40,6 +44,7 @@ export function QuickTradeControls({ currentPrice, poolKey, stake, riskRatio, ma
   const closeTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [timerExpired, setTimerExpired] = useState(false);
   const [closeError, setCloseError] = useState<string | null>(null);
+  const [openError, setOpenError] = useState<string | null>(null);
 
   // Auto-close when timer expires (only once — no retry loop)
   useEffect(() => {
@@ -76,6 +81,7 @@ export function QuickTradeControls({ currentPrice, poolKey, stake, riskRatio, ma
     if (quickTradeState !== 'idle' || !currentPrice || predictionMode !== 'quick') return;
 
     setQuickTradeState('opening');
+    setOpenError(null);
 
     try {
       const result = await openPosition({
@@ -103,9 +109,27 @@ export function QuickTradeControls({ currentPrice, poolKey, stake, riskRatio, ma
       setQuickTradeState('watching');
     } catch (err) {
       console.error('Failed to open position:', err);
+      const msg = err instanceof Error ? err.message : 'Failed to open position';
+      // Show user-friendly error
+      if (msg.includes('Need ~') && msg.includes('more')) {
+        // "Need ~X more DEEP to fully close SHORT" — show full message
+        setOpenError(msg.length > 100 ? msg.slice(0, 100) + '...' : msg);
+      } else if (msg.includes('Cannot clear debt') || msg.includes('Could not fully close')) {
+        setOpenError('Cannot close previous position — need more tokens');
+      } else if (msg.includes('Insufficient balance') || msg.includes('not enough coins')) {
+        setOpenError('Not enough tokens in wallet — get more from faucet');
+      } else if (msg.includes('error 4') || msg.includes('borrow_quote') || msg.includes('borrow_base')) {
+        setOpenError('Existing position blocks this trade — try again');
+      } else if (msg.includes('error 3') && msg.includes('margin_pool')) {
+        setOpenError('Pool liquidity full — reduce size or try later');
+      } else if (msg.includes('rejected')) {
+        setOpenError('Wallet rejected — approve to trade');
+      } else {
+        setOpenError(msg.length > 80 ? msg.slice(0, 80) + '...' : msg);
+      }
       setQuickTradeState('idle');
     }
-  }, [quickTradeState, currentPrice, predictionMode, poolKey, stake, selectedLeverage, selectedTimeframe, openPosition, setQuickTradeState, setActivePrediction]);
+  }, [quickTradeState, currentPrice, predictionMode, poolKey, stake, selectedLeverage, selectedTimeframe, openPosition, setQuickTradeState, setActivePrediction, marginPosition]);
 
   const handleClose = useCallback(async () => {
     if (!activePrediction || !currentPrice) return;
@@ -170,19 +194,59 @@ export function QuickTradeControls({ currentPrice, poolKey, stake, riskRatio, ma
     ? Math.max(0, activePrediction.timeframe - (Date.now() - activePrediction.startedAt) / 1000)
     : 0;
 
+  const positionSize = stake * selectedLeverage;
+  const borrowAmount = stake * (selectedLeverage - 1);
+
   return (
     <div className="flex flex-col gap-3 p-4">
-      {/* Selectors row */}
+      {/* Collateral + Leverage row */}
       <div className="flex items-center justify-between">
-        <TimeframeSelector
-          timeframe={selectedTimeframe}
-          onChange={setTimeframe}
-        />
+        <StakeSelector stake={stake} stakes={stakes} onStakeChange={onStakeChange} />
         <LeverageSelector
           leverage={selectedLeverage}
           onChange={setLeverage}
         />
       </div>
+
+      {/* Trade info summary */}
+      {quickTradeState === 'idle' && currentPrice && (
+        <div className="grid grid-cols-3 gap-2 px-1 text-center">
+          <div>
+            <span className="block text-[10px] text-white/40">Collateral</span>
+            <span className="text-xs font-mono text-white/80">{stake} {quoteCoin}</span>
+          </div>
+          <div>
+            <span className="block text-[10px] text-white/40">Borrow</span>
+            <span className="text-xs font-mono text-yellow-300/80">{borrowAmount.toFixed(1)} {quoteCoin}</span>
+          </div>
+          <div>
+            <span className="block text-[10px] text-white/40">Position</span>
+            <span className="text-xs font-mono text-neon-lime">{positionSize.toFixed(1)} {quoteCoin}</span>
+          </div>
+        </div>
+      )}
+
+      {/* Timeframe selector */}
+      <div className="flex items-center justify-between">
+        <TimeframeSelector
+          timeframe={selectedTimeframe}
+          onChange={setTimeframe}
+        />
+      </div>
+
+      {/* Opening indicator */}
+      {quickTradeState === 'opening' && (
+        <div className="text-center py-2 text-sm text-white/60 animate-pulse">
+          Opening position... approve wallet
+        </div>
+      )}
+
+      {/* Open error message */}
+      {openError && quickTradeState === 'idle' && (
+        <div className="text-center text-xs text-red-400 bg-red-500/10 rounded-lg py-1.5 px-2">
+          {openError}
+        </div>
+      )}
 
       {/* Status row (during active trade) */}
       {isActive && activePrediction && (
