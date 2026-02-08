@@ -86,11 +86,24 @@ export function useMarginManager(): UseMarginManagerReturn {
     return keys.length > 0 ? managerIds[keys[0]] : null;
   }, [managerIds]);
 
-  // Build MarginManager map for SDK config
+  // Build MarginManager map for SDK config.
+  // Register the manager for ALL margin pools — the on-chain MarginManager is
+  // pool-agnostic and can operate on any pool. Without this, the SDK can't
+  // build repay/unwind transactions for pools other than the one the manager
+  // was originally created for, causing error 4 (ECannotHaveLoanInMoreThanOneMarginPool)
+  // when stale debt exists in a different pool.
   const marginManagers = useMemo(() => {
     const mgrs: Record<string, MarginManager> = {};
-    for (const [poolKey, addr] of Object.entries(managerIds)) {
+    // Get any available manager address (typically the user has one manager)
+    const addresses = Object.values(managerIds);
+    if (addresses.length === 0) return mgrs;
+    const primaryAddr = addresses[0];
+
+    // Register under every margin pool key so the SDK can operate on any pool
+    for (const poolKey of MARGIN_POOL_KEYS) {
       const mgrKey = `${poolKey}_MGR`;
+      // Prefer pool-specific manager if one exists, otherwise use primary
+      const addr = managerIds[poolKey] ?? primaryAddr;
       mgrs[mgrKey] = { address: addr, poolKey };
     }
     return mgrs;

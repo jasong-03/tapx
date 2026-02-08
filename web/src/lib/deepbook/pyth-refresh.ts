@@ -255,19 +255,28 @@ export async function prependPythPriceUpdate(
  * Build a fresh transaction with Pyth price updates prepended,
  * then apply margin operations on top.
  *
- * @param poolKey - The pool key (e.g. 'SUI_DBUSDC')
+ * @param poolKeys - One or more pool keys (e.g. 'SUI_DBUSDC' or ['DEEP_SUI', 'SUI_DBUSDC']).
+ *                   When multiple pools are provided, Pyth updates are added for all
+ *                   (needed when unwinding stale debt in pool A before opening in pool B).
  * @param sender - Transaction sender address
  * @param buildMarginOps - Callback to add margin operations to the tx
  */
 export async function buildMarginTxWithPythRefresh(
-  poolKey: string,
+  poolKeys: string | string[],
   sender: string,
   buildMarginOps: (tx: Transaction) => void,
 ): Promise<Transaction> {
   const tx = new Transaction();
   tx.setSenderIfNotSet(sender);
 
-  await addPythPriceUpdates(tx, poolKey);
+  const keys = Array.isArray(poolKeys) ? poolKeys : [poolKeys];
+  // Deduplicate and add Pyth updates for each pool
+  const seen = new Set<string>();
+  for (const key of keys) {
+    if (seen.has(key)) continue;
+    seen.add(key);
+    await addPythPriceUpdates(tx, key);
+  }
 
   // Now add the margin operations
   buildMarginOps(tx);

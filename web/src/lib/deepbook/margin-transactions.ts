@@ -8,6 +8,198 @@ import type { DeepBookClient } from '@mysten/deepbook-v3';
 import type { SuiJsonRpcClient } from '@mysten/sui/jsonRpc';
 import { getPool } from './pools';
 import { DEEPBOOK_PACKAGE_ID, DUMMY_SENDER } from './config';
+import { MARGIN_POOL_KEYS } from './margin-config';
+
+export interface ManagerState {
+  baseAsset: number;
+  quoteAsset: number;
+  baseDebt: number;
+  quoteDebt: number;
+}
+
+/**
+ * Query the margin manager's full state (assets + debts) via devInspectTransactionBlock.
+ * Returns null if the query fails (manager not found, etc.).
+ */
+export async function queryManagerState(
+  client: SuiJsonRpcClient,
+  dbClient: DeepBookClient,
+  managerId: string,
+  poolKey: string,
+): Promise<ManagerState | null> {
+  const pool = getPool(poolKey);
+  if (!pool) return null;
+
+  try {
+    const tx = new Transaction();
+    tx.setSenderIfNotSet(DUMMY_SENDER);
+
+    const { prependPythPriceUpdate } = await import('./pyth-refresh');
+    await prependPythPriceUpdate(tx, poolKey);
+
+    dbClient.marginManager.managerState(poolKey, managerId)(tx);
+
+    const result = await client.devInspectTransactionBlock({
+      transactionBlock: tx,
+      sender: DUMMY_SENDER,
+    });
+
+    if (!result.results || result.results.length === 0) return null;
+
+    const returnValues = result.results[result.results.length - 1]?.returnValues;
+    if (!returnValues || returnValues.length < 7) return null;
+
+    // [0] manager_id, [1] pool_id, [2] risk_ratio,
+    // [3] base_asset, [4] quote_asset, [5] base_debt, [6] quote_debt
+    const parseU64 = (rv: [number[], string]): number => {
+      if (!rv || rv[1] !== 'u64') return 0;
+      return Number(bcs.u64().parse(new Uint8Array(rv[0])));
+    };
+
+    const baseScalar = Math.pow(10, pool.baseDecimals);
+    const quoteScalar = Math.pow(10, pool.quoteDecimals);
+
+    return {
+      baseAsset: parseU64(returnValues[3] as [number[], string]) / baseScalar,
+      quoteAsset: parseU64(returnValues[4] as [number[], string]) / quoteScalar,
+      baseDebt: parseU64(returnValues[5] as [number[], string]) / baseScalar,
+      quoteDebt: parseU64(returnValues[6] as [number[], string]) / quoteScalar,
+    };
+  } catch (err) {
+    console.warn('Failed to query manager state:', err);
+    return null;
+  }
+}
+
+/**
+ * Scan ALL margin pools to find which pool (if any) has outstanding debt
+ * for the given manager. This is needed because error 4 (ECannotHaveLoanInMoreThanOneMarginPool)
+ * fires when a manager tries to borrow from a different pool than the one holding its debt.
+ *
+ * Returns the pool key and state of the pool with debt, or null if no debt found.
+ * Skips `excludePoolKey` if its state is already known by the caller.
+ */
+export async function findStaleDebtPool(
+  client: SuiJsonRpcClient,
+  dbClient: DeepBookClient,
+  managerId: string,
+  excludePoolKey?: string,
+): Promise<{ poolKey: string; state: ManagerState; lotSize: number } | null> {
+  for (const poolKey of MARGIN_POOL_KEYS) {
+    if (poolKey === excludePoolKey) continue;
+    const state = await queryManagerState(client, dbClient, managerId, poolKey);
+    if (state && (state.baseDebt > 0 || state.quoteDebt > 0)) {
+      const bookParams = await queryPoolBookParams(client, poolKey);
+      return { poolKey, state, lotSize: bookParams.lotSize };
+    }
+  }
+  return null;
+}
+
+/**
+ * Query the user's wallet balance for a specific coin type.
+ * Returns the balance in human-readable units.
+ */
+export async function queryTokenBalance(
+  client: SuiJsonRpcClient,
+  owner: string,
+  coinType: string,
+  decimals: number,
+): Promise<number> {
+  try {
+    const balance = await client.getBalance({ owner, coinType });
+    return Number(balance.totalBalance) / Math.pow(10, decimals);
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Build operations to fully unwind a stale position and clear all debt.
+ *
+ * Logic:
+ * - quoteDebt > 0 && baseAsset > 0 → was a long: sell all base, then repayQuote
+ * - baseDebt > 0 → was a short: hybrid approach —
+ *     1. Deposit base from wallet (capped to what user has, leave 5% for gas)
+ *     2. Market buy to sweep remaining order book liquidity
+ *     3. RepayBase with combined funds
+ * - Always withdraw settled amounts at the end
+ *
+ * The hybrid approach handles thin-liquidity pools (common on testnet) by
+ * combining wallet deposit + order book sweep for maximum coverage.
+ */
+export function buildUnwindStalePositionOps(
+  dbClient: DeepBookClient,
+  poolKey: string,
+  managerKey: string,
+  posState: ManagerState,
+  lotSize: number,
+  walletBaseBalance = 0,
+): (tx: Transaction) => void {
+  return (tx: Transaction) => {
+    // Determine position direction from debt
+    const isLong = posState.quoteDebt > 0;
+
+    if (isLong && posState.baseAsset > 0) {
+      // Long position: sell all base to convert back to quote for repayment.
+      const sellQty = alignToLotSize(posState.baseAsset, lotSize);
+      if (sellQty > 0) {
+        dbClient.poolProxy.placeMarketOrder({
+          poolKey,
+          marginManagerKey: managerKey,
+          clientOrderId: nextClientOrderId(),
+          isBid: false, // sell base
+          quantity: sellQty,
+          payWithDeep: true,
+        })(tx);
+      }
+    } else if (!isLong && posState.baseDebt > 0) {
+      // Short position: need to return borrowed base.
+      // Hybrid strategy: deposit from wallet + market buy from order book.
+      const debtWithBuffer = posState.baseDebt * 1.02;
+
+      // Step 1: Deposit available base from wallet (leave 5% for gas on SUI-type coins)
+      const safeWalletBalance = walletBaseBalance * 0.95;
+      const depositAmount = Math.min(safeWalletBalance, debtWithBuffer);
+      if (depositAmount > 0) {
+        dbClient.marginManager.depositBase({
+          managerKey,
+          amount: depositAmount,
+        })(tx);
+      }
+
+      // Step 2: If wallet deposit doesn't cover full debt, also market buy
+      // to sweep whatever order book liquidity exists
+      const remainingDebt = debtWithBuffer - depositAmount;
+      if (remainingDebt > 0 && posState.quoteAsset > 0) {
+        const buyQty = lotSize > 0
+          ? Math.ceil(remainingDebt / lotSize) * lotSize
+          : remainingDebt;
+        if (buyQty > 0) {
+          dbClient.poolProxy.placeMarketOrder({
+            poolKey,
+            marginManagerKey: managerKey,
+            clientOrderId: nextClientOrderId(),
+            isBid: true, // buy base
+            quantity: buyQty,
+            payWithDeep: true,
+          })(tx);
+        }
+      }
+    }
+
+    // Repay all outstanding debt
+    if (posState.quoteDebt > 0) {
+      dbClient.marginManager.repayQuote(managerKey)(tx);
+    }
+    if (posState.baseDebt > 0) {
+      dbClient.marginManager.repayBase(managerKey)(tx);
+    }
+
+    // Withdraw everything back to wallet
+    dbClient.poolProxy.withdrawSettledAmounts(managerKey)(tx);
+  };
+}
 
 interface OpenPositionOpsParams {
   poolKey: string;
@@ -50,6 +242,12 @@ function nextClientOrderId(): string {
 // Minimum quantity thresholds to avoid MoveAbort in validate_inputs
 const MIN_QUOTE_QUANTITY = 0.01; // minimum quote amount for market orders
 const MIN_BASE_QUANTITY = 0.000001; // minimum base amount for market orders
+
+// Safety factor for market orders to account for taker fees + slippage.
+// On-chain placeMarketOrder calls withdraw_with_proof which aborts with
+// EBalanceManagerBalanceTooLow (code 3) if the order cost exceeds deposited
+// + borrowed quote. A 3% buffer prevents this for non-whitelisted pools.
+const MARKET_ORDER_SAFETY_FACTOR = 0.97;
 
 /**
  * Align a base quantity to the pool's lot_size.
@@ -145,8 +343,10 @@ export function buildOpenLongOps(
     throw new Error(`Order quantity too small: ${totalQuote}. Minimum is ${MIN_QUOTE_QUANTITY}.`);
   }
 
-  // Convert quote buying-power to base quantity, then align to lot_size
-  const rawBaseQuantity = totalQuote / params.currentPrice;
+  // Convert quote buying-power to base quantity, then align to lot_size.
+  // Apply safety factor to leave headroom for taker fees + slippage —
+  // without this, withdraw_with_proof aborts with EBalanceManagerBalanceTooLow.
+  const rawBaseQuantity = (totalQuote / params.currentPrice) * MARKET_ORDER_SAFETY_FACTOR;
   const baseQuantity = alignToLotSize(rawBaseQuantity, params.lotSize);
 
   if (baseQuantity < MIN_BASE_QUANTITY) {
@@ -192,8 +392,9 @@ export function buildOpenShortOps(
   }
 
   const borrowValue = params.collateral * (params.leverage - 1);
-  // Convert quote to base, then align to lot_size
-  const rawBorrowBase = borrowValue / params.currentPrice;
+  // Convert quote to base, then align to lot_size.
+  // Apply safety factor for fees + slippage (same as long).
+  const rawBorrowBase = (borrowValue / params.currentPrice) * MARKET_ORDER_SAFETY_FACTOR;
   const borrowBase = alignToLotSize(rawBorrowBase, params.lotSize);
 
   if (borrowBase < MIN_BASE_QUANTITY) {
@@ -283,8 +484,9 @@ export function buildMarginLimitOrderOps(
     throw new Error(`Order quantity too small: ${totalQuote}. Minimum is ${MIN_QUOTE_QUANTITY}.`);
   }
 
-  // Convert quote to base using the target limit price, then align to lot_size
-  const rawBaseQuantity = totalQuote / params.targetPrice;
+  // Convert quote to base using the target limit price, then align to lot_size.
+  // Apply safety factor for fees.
+  const rawBaseQuantity = (totalQuote / params.targetPrice) * MARKET_ORDER_SAFETY_FACTOR;
   const baseQuantity = alignToLotSize(rawBaseQuantity, params.lotSize);
 
   if (baseQuantity < MIN_BASE_QUANTITY) {
