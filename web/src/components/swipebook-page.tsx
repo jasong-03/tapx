@@ -8,7 +8,7 @@ import { SwipeBookProvider, useSwipeBook } from "@/context/SwipeBookContext"
 import { BottomNav } from "@/components/swipebook/BottomNav"
 import { PortfolioView } from "@/components/swipebook/PortfolioView"
 import { TradeHistory } from "@/components/swipebook/TradeHistory"
-import { createBet, type Bet } from "@/lib/tap-trade/betting"
+import { createBet, checkBetWin, isBetExpired, type Bet } from "@/lib/tap-trade/betting"
 import { AssetPill } from "@/components/tap-trade/asset-pill"
 import { BalancePill } from "@/components/tap-trade/balance-pill"
 import { StakeSelector } from "@/components/tap-trade/stake-selector"
@@ -17,18 +17,14 @@ import { Toast } from "@/components/tap-trade/toast"
 import { TileScaler } from "@/components/tap-trade/tile-scaler"
 import { ModeToggle } from "@/components/tap-trade/ModeToggle"
 import { QuickTradeControls } from "@/components/tap-trade/QuickTradeControls"
-import { LeverageSelector } from "@/components/tap-trade/LeverageSelector"
-import { MarginHealthGauge } from "@/components/tap-trade/MarginHealthGauge"
 import { RoundHistory } from "@/components/tap-trade/RoundHistory"
 import { ResultReveal } from "@/components/tap-trade/ResultReveal"
 import { useDeepBookPriceStream } from "@/hooks/tap-trade/useDeepBookPriceStream"
 import { useUserBalance } from "@/hooks/useUserBalance"
 import { useMarginManager } from "@/hooks/swipebook/useMarginManager"
 import { useMarginPosition } from "@/hooks/swipebook/useMarginPosition"
-import { useMarginTradeExecution } from "@/hooks/swipebook/useMarginTradeExecution"
 import { getSwipeBookPools } from "@/lib/deepbook/pools"
 import { MARGIN_POOL_KEYS, type MarginPoolKey } from "@/lib/deepbook/margin-config"
-import type { PredictionRound } from "@/context/SwipeBookContext"
 import type { Pool } from "@/lib/swipebook/types"
 import type { SwipeBookView } from "@/lib/swipebook/types"
 
@@ -53,13 +49,24 @@ const ROWS = 14
 const COLS = 12
 const TIME_STEP_MS = 5000
 const HISTORY_WINDOW_MS = 60000
+const INITIAL_PREDICTION_BALANCE = 100
 
-// Grid target bet: tracks the cell the user clicked for monitoring
-interface GridTargetBet {
-  priceMin: number
-  priceMax: number
-  direction: 'long' | 'short'
-  absolutePrice: number
+// --- Prediction balance persistence (keyed by wallet) ---
+function loadPredictionBalance(address: string): number {
+  if (typeof window === 'undefined') return INITIAL_PREDICTION_BALANCE
+  try {
+    const stored = localStorage.getItem(`tapx_pred_balance_${address}`)
+    return stored ? parseFloat(stored) : INITIAL_PREDICTION_BALANCE
+  } catch {
+    return INITIAL_PREDICTION_BALANCE
+  }
+}
+
+function savePredictionBalance(address: string, balance: number): void {
+  if (typeof window === 'undefined') return
+  try {
+    localStorage.setItem(`tapx_pred_balance_${address}`, String(balance))
+  } catch {}
 }
 
 function TapTradeContent() {
@@ -71,8 +78,6 @@ function TapTradeContent() {
     setPredictionMode,
     setQuickTradeState,
     setActivePrediction,
-    setLeverage,
-    addRound,
   } = useSwipeBook()
 
   const isQuickMode = state.predictionMode === 'quick'
@@ -95,18 +100,15 @@ function TapTradeContent() {
     : 0
   const balanceLoading = quoteLoading || baseLoading
 
-  // Margin manager (shared between Quick Trade and Grid mode)
+  // Margin manager (for Quick Trade mode)
   const { managerIds, isCreating, createManager } = useMarginManager()
-
-  // Pool-specific manager ID: ensures we have a manager for the CURRENT pool
-  // (managerId returns the first available from ANY pool, which may not match)
   const currentPoolManagerId = managerIds[selectedPool.poolKey] ?? null
 
   // Determine direction from active prediction for margin position query
   const activeDirection = state.activePrediction?.direction === 'long'
 
-  // Margin position query (enabled in both Quick and Grid mode when position is open)
-  const hasActivePosition = state.quickTradeState === 'watching' || state.quickTradeState === 'closing'
+  // Margin position query (Quick Trade only, when position is open)
+  const hasActivePosition = isQuickMode && (state.quickTradeState === 'watching' || state.quickTradeState === 'closing')
   const { data: marginPosition } = useMarginPosition({
     managerId: currentPoolManagerId,
     poolKey: selectedPool.poolKey,
@@ -115,14 +117,22 @@ function TapTradeContent() {
     enabled: !!currentPoolManagerId && hasActivePosition,
   })
 
-  // Margin trade execution (for Grid mode)
-  const { openPosition, closePosition } = useMarginTradeExecution()
+  // --- Grid mode: virtual prediction balance ---
+  const [predictionBalance, setPredictionBalance] = useState(INITIAL_PREDICTION_BALANCE)
 
-  // Grid mode state
-  const [gridTargetBet, setGridTargetBet] = useState<GridTargetBet | null>(null)
-  const [timerExpired, setTimerExpired] = useState(false)
-  const [targetReached, setTargetReached] = useState(false)
-  const [closeError, setCloseError] = useState<string | null>(null)
+  // Load prediction balance on wallet connect
+  useEffect(() => {
+    if (currentAccount?.address) {
+      setPredictionBalance(loadPredictionBalance(currentAccount.address))
+    }
+  }, [currentAccount?.address])
+
+  // Save whenever balance changes
+  useEffect(() => {
+    if (currentAccount?.address) {
+      savePredictionBalance(currentAccount.address, predictionBalance)
+    }
+  }, [predictionBalance, currentAccount?.address])
 
   const [stake, setStake] = useState(1)
   const [bets, setBets] = useState<Bet[]>([])
@@ -131,7 +141,6 @@ function TapTradeContent() {
 
   const betsRef = useRef(bets)
   betsRef.current = bets
-  const closeTimerRef = useRef<NodeJS.Timeout | null>(null)
 
   // Zoom-based priceStep
   const priceStep = currentPrice ? currentPrice * (0.002 / zoom) : 0.01
@@ -145,6 +154,21 @@ function TapTradeContent() {
       setPredictionMode('grid')
     }
   }, [selectedPool.poolKey, isQuickMode, poolSupportsMargin, setPredictionMode])
+
+  // Clear Quick Trade overlay when switching to Grid mode or changing pools
+  useEffect(() => {
+    if (!isQuickMode) {
+      // Entering Grid mode — clear any stale Quick Trade state
+      setActivePrediction(null)
+      setQuickTradeState('idle')
+    }
+  }, [isQuickMode, setActivePrediction, setQuickTradeState])
+
+  useEffect(() => {
+    // Pool changed — clear Quick Trade state to avoid stale overlays
+    setActivePrediction(null)
+    setQuickTradeState('idle')
+  }, [selectedPool.poolKey, setActivePrediction, setQuickTradeState])
 
   // Cleanup old order tiles
   useEffect(() => {
@@ -165,56 +189,52 @@ function TapTradeContent() {
     setBets([])
   }, [selectedPool.address])
 
-  // Grid mode: Timer expiry effect (same pattern as QuickTradeControls)
+  // --- Grid mode: auto-resolve bets (virtual) ---
   useEffect(() => {
-    if (isQuickMode) return
-    if (state.quickTradeState !== 'watching' || !state.activePrediction) return
-
-    const elapsed = Date.now() - state.activePrediction.startedAt
-    const remaining = state.activePrediction.timeframe * 1000 - elapsed
-
-    if (remaining <= 0) {
-      setTimerExpired(true)
-      return
-    }
-
-    closeTimerRef.current = setTimeout(() => {
-      setTimerExpired(true)
-    }, remaining)
-
-    return () => {
-      if (closeTimerRef.current) clearTimeout(closeTimerRef.current)
-    }
-  }, [isQuickMode, state.quickTradeState, state.activePrediction])
-
-  // Grid mode: Target price monitoring (every 500ms)
-  useEffect(() => {
-    if (isQuickMode) return
-    if (state.quickTradeState !== 'watching' || !gridTargetBet || !currentPrice) return
+    if (isQuickMode || !currentPrice) return
 
     const interval = setInterval(() => {
-      if (!currentPrice || !gridTargetBet) return
-      if (currentPrice >= gridTargetBet.priceMin && currentPrice <= gridTargetBet.priceMax) {
-        setTargetReached(true)
-      }
+      const now = Date.now()
+      const price = currentPrice
+      if (!price) return
+
+      setBets((prev) => {
+        let balanceDelta = 0
+        const updated = prev.map((bet) => {
+          if (bet.status !== 'open') return bet
+
+          // Check win: price in range during the bet's time window
+          if (checkBetWin(bet, price, now)) {
+            balanceDelta += bet.stake * bet.multiplier
+            haptic([50, 30, 100])
+            fireConfetti()
+            return { ...bet, status: 'won' as const, hitAt: now }
+          }
+
+          // Check expired
+          if (isBetExpired(bet)) {
+            balanceDelta -= 0 // stake already deducted on placement
+            haptic([100, 50, 100])
+            return { ...bet, status: 'lost' as const }
+          }
+
+          return bet
+        })
+
+        if (balanceDelta !== 0) {
+          setPredictionBalance((prev) => prev + balanceDelta)
+        }
+
+        return updated
+      })
     }, 500)
 
     return () => clearInterval(interval)
-  }, [isQuickMode, state.quickTradeState, gridTargetBet, currentPrice])
+  }, [isQuickMode, currentPrice])
 
-  // Reset grid state when prediction clears
-  useEffect(() => {
-    if (!state.activePrediction) {
-      setTimerExpired(false)
-      setTargetReached(false)
-      setCloseError(null)
-      setGridTargetBet(null)
-    }
-  }, [state.activePrediction])
-
-  // Grid mode cell click handler — opens real margin position
+  // Grid mode cell click handler — virtual prediction bet
   const handleCellClick = useCallback(
-    async (
+    (
       row: number,
       col: number,
       priceMin: number,
@@ -224,149 +244,43 @@ function TapTradeContent() {
       multiplier: number,
       absolutePrice: number,
     ) => {
-      // Block if position already open
-      if (state.quickTradeState !== 'idle') {
-        setToast({ message: "Position active — close it first", type: "info" })
-        return
-      }
-
-      if (!currentAccount) {
-        setToast({ message: "Connect wallet first", type: "error" })
-        return
-      }
-
-      if (!currentPoolManagerId) {
-        setToast({ message: "Create margin account first", type: "error" })
-        return
-      }
-
       if (!currentPrice) return
 
-      // Determine direction: cell above current price = long, below = short
+      // Prevent duplicate on same cell
+      const existingBet = betsRef.current.find(
+        (b) =>
+          b.betStartTime === betStartTime &&
+          Math.abs((b.priceMin + b.priceMax) / 2 - absolutePrice) < priceStep / 2 &&
+          b.status === "open",
+      )
+      if (existingBet) {
+        setToast({ message: "Order already placed here", type: "info" })
+        return
+      }
+
+      // Check prediction balance
+      if (predictionBalance < stake) {
+        setToast({ message: "Insufficient prediction balance", type: "error" })
+        return
+      }
+
       const direction: 'long' | 'short' = absolutePrice >= currentPrice ? 'long' : 'short'
 
-      setQuickTradeState('opening')
+      // Deduct stake from prediction balance
+      setPredictionBalance((prev) => prev - stake)
 
-      try {
-        const result = await openPosition({
-          direction,
-          poolKey: selectedPool.poolKey,
-          collateral: stake,
-          leverage: state.selectedLeverage,
-          currentPrice,
-        })
+      // Create bet tile
+      const bet = createBet(stake, multiplier, priceMin, priceMax, expiresAt, betStartTime, row, col, direction)
+      setBets((prev) => [...prev, bet])
 
-        // Create PredictionRound (same shape as Quick Trade)
-        const round: PredictionRound = {
-          id: result.digest,
-          poolKey: selectedPool.poolKey,
-          direction,
-          leverage: state.selectedLeverage,
-          collateral: stake,
-          entryPrice: result.entryPrice,
-          baseQuantity: result.baseQuantity,
-          timeframe: state.selectedTimeframe,
-          startedAt: Date.now(),
-          txDigestOpen: result.digest,
-        }
-
-        setActivePrediction(round)
-
-        // Store target cell for monitoring
-        setGridTargetBet({
-          priceMin,
-          priceMax,
-          direction,
-          absolutePrice,
-        })
-
-        // Create visual bet tile on the chart
-        const bet = createBet(stake, multiplier, priceMin, priceMax, expiresAt, betStartTime, row, col, direction)
-        setBets([bet])
-
-        setQuickTradeState('watching')
-
-        haptic(30)
-        setToast({
-          message: `${direction === 'long' ? 'Long' : 'Short'} ${state.selectedLeverage}x opened @ $${currentPrice.toFixed(4)}`,
-          type: "success",
-        })
-      } catch (err) {
-        console.error('Failed to open grid position:', err)
-        setQuickTradeState('idle')
-        const msg = err instanceof Error ? err.message : 'Failed to open position'
-        setToast({ message: msg, type: "error" })
-      }
-    },
-    [currentAccount, currentPrice, currentPoolManagerId, stake, state.quickTradeState, state.selectedLeverage, state.selectedTimeframe, selectedPool.poolKey, openPosition, setQuickTradeState, setActivePrediction],
-  )
-
-  // Grid mode: close position handler (same pattern as QuickTradeControls)
-  const handleGridClose = useCallback(async () => {
-    if (!state.activePrediction || !currentPrice) return
-
-    setQuickTradeState('closing')
-    setCloseError(null)
-
-    try {
-      const isLong = state.activePrediction.direction === 'long'
-      const onChainQuantity = marginPosition
-        ? (isLong ? marginPosition.baseBalance : marginPosition.baseDebt)
-        : state.activePrediction.baseQuantity
-
-      await closePosition({
-        poolKey: state.activePrediction.poolKey,
-        quantity: onChainQuantity,
-        isLong,
+      haptic(30)
+      setToast({
+        message: `${direction === 'long' ? 'Long' : 'Short'} $${stake} @ ${formatMultiplier(multiplier)}`,
+        type: "success",
       })
-
-      const exitPrice = currentPrice
-      const priceDiff = exitPrice - state.activePrediction.entryPrice
-      const pnl = state.activePrediction.direction === 'long'
-        ? priceDiff * state.activePrediction.collateral * state.activePrediction.leverage / state.activePrediction.entryPrice
-        : -priceDiff * state.activePrediction.collateral * state.activePrediction.leverage / state.activePrediction.entryPrice
-      const pnlPercent = (pnl / state.activePrediction.collateral) * 100
-
-      const completedRound: PredictionRound = {
-        ...state.activePrediction,
-        exitPrice,
-        closedAt: Date.now(),
-        pnl,
-        pnlPercent,
-        result: pnl > 0 ? 'win' : 'loss',
-      }
-
-      // Update bet tile to won/lost
-      setBets((prev) =>
-        prev.map((b) =>
-          b.status === 'open'
-            ? { ...b, status: pnl > 0 ? 'won' as const : 'lost' as const, hitAt: Date.now() }
-            : b
-        ),
-      )
-
-      if (pnl > 0) {
-        fireConfetti()
-        haptic([50, 30, 100])
-      } else {
-        haptic([100, 50, 100])
-      }
-
-      setActivePrediction(completedRound)
-      addRound(completedRound)
-      setQuickTradeState('result')
-
-      // Auto-reset to idle after 3s
-      setTimeout(() => {
-        setActivePrediction(null)
-        setQuickTradeState('idle')
-      }, 3000)
-    } catch (err) {
-      console.error('Failed to close grid position:', err)
-      setCloseError(err instanceof Error ? err.message : 'Close failed')
-      setQuickTradeState('watching')
-    }
-  }, [state.activePrediction, currentPrice, marginPosition, closePosition, setQuickTradeState, setActivePrediction, addRound])
+    },
+    [currentPrice, stake, predictionBalance, priceStep],
+  )
 
   const handleViewChange = useCallback(
     (view: SwipeBookView) => {
@@ -383,7 +297,7 @@ function TapTradeContent() {
     [router, setView],
   )
 
-  // Handle margin manager creation
+  // Handle margin manager creation (Quick Trade only)
   const handleCreateManager = useCallback(async () => {
     if (!currentAccount) {
       setToast({ message: "Connect wallet first", type: "error" })
@@ -399,25 +313,14 @@ function TapTradeContent() {
     }
   }, [currentAccount, selectedPool.poolKey, createManager, setToast])
 
-  // ResultReveal callback
+  // ResultReveal callback (Quick Trade)
   const handleResultComplete = useCallback(() => {
     setActivePrediction(null)
     setQuickTradeState('idle')
   }, [setActivePrediction, setQuickTradeState])
 
-  // Grid bottom bar: active position info
-  const gridIsActive = !isQuickMode && (state.quickTradeState === 'watching' || state.quickTradeState === 'closing')
-  const gridPnl = state.activePrediction && currentPrice
-    ? (() => {
-        const priceDiff = currentPrice - state.activePrediction.entryPrice
-        return state.activePrediction.direction === 'long'
-          ? priceDiff * state.activePrediction.collateral * state.activePrediction.leverage / state.activePrediction.entryPrice
-          : -priceDiff * state.activePrediction.collateral * state.activePrediction.leverage / state.activePrediction.entryPrice
-      })()
-    : null
-  const gridPnlPercent = gridPnl !== null && state.activePrediction
-    ? (gridPnl / state.activePrediction.collateral) * 100
-    : null
+  // Count open bets for grid mode
+  const openBetCount = bets.filter((b) => b.status === 'open').length
 
   // Portfolio / History views
   if (state.currentView === "portfolio") {
@@ -503,7 +406,7 @@ function TapTradeContent() {
       {/* Bottom overlays - above nav */}
       <div className="absolute bottom-[84px] left-0 right-0 z-20">
         {isQuickMode ? (
-          /* Quick Trade Mode: UP/DOWN controls */
+          /* Quick Trade Mode: real margin trading */
           <div className="bg-black/40 backdrop-blur-sm border-t border-white/5">
             {!currentAccount ? (
               <div className="p-4 text-center text-white/50 text-sm">
@@ -531,134 +434,27 @@ function TapTradeContent() {
             )}
           </div>
         ) : (
-          /* Grid Mode: Real margin trading bottom bar */
+          /* Grid Mode: virtual prediction bets */
           <div className="bg-black/40 backdrop-blur-sm border-t border-white/5">
-            {!currentAccount ? (
-              <div className="p-4 text-center text-white/50 text-sm">
-                Connect wallet to trade
-              </div>
-            ) : !poolSupportsMargin ? (
-              <div className="flex items-center justify-between px-3 py-2">
-                <BalancePill
-                  baseBalance={baseBalance}
-                  quoteBalance={quoteBalance}
-                  baseCoin={selectedPool.baseCoin}
-                  quoteCoin={selectedPool.quoteCoin}
-                  isLoading={balanceLoading}
-                  isConnected={!!currentAccount}
-                />
+            <div className="flex items-center justify-between px-3 py-2">
+              <BalancePill
+                baseBalance={baseBalance}
+                quoteBalance={quoteBalance}
+                baseCoin={selectedPool.baseCoin}
+                quoteCoin={selectedPool.quoteCoin}
+                isLoading={balanceLoading}
+                isConnected={!!currentAccount}
+                predictionBalance={predictionBalance}
+              />
+              <div className="flex items-center gap-2">
+                {openBetCount > 0 && (
+                  <span className="text-xs text-neon-lime font-mono">
+                    {openBetCount} open
+                  </span>
+                )}
                 <StakeSelector stake={stake} stakes={STAKES} onStakeChange={setStake} />
               </div>
-            ) : !currentPoolManagerId ? (
-              <div className="p-4 text-center">
-                <button
-                  onClick={handleCreateManager}
-                  disabled={isCreating}
-                  className="px-6 py-2.5 bg-gradient-to-r from-cyan-500 to-blue-500 text-white rounded-xl font-medium text-sm disabled:opacity-50"
-                >
-                  {isCreating ? 'Creating...' : 'Create Margin Account'}
-                </button>
-                <p className="text-white/40 text-xs mt-2">Required for grid trading</p>
-              </div>
-            ) : state.quickTradeState === 'opening' ? (
-              <div className="p-4 text-center text-white/50 text-sm">
-                Opening position...
-              </div>
-            ) : state.quickTradeState === 'result' && state.activePrediction ? (
-              /* Result display */
-              <div className={`p-3 text-center rounded-t-xl ${state.activePrediction.result === 'win' ? 'bg-green-500/20' : 'bg-red-500/20'}`}>
-                <div className={`text-2xl font-bold ${state.activePrediction.result === 'win' ? 'text-green-400' : 'text-red-400'}`}>
-                  {state.activePrediction.pnl && state.activePrediction.pnl >= 0 ? '+' : ''}${state.activePrediction.pnl?.toFixed(2)}
-                </div>
-                <div className="text-xs text-white/50">
-                  {state.activePrediction.pnlPercent?.toFixed(1)}% PnL
-                </div>
-              </div>
-            ) : state.quickTradeState === 'closing' ? (
-              <div className="p-4 text-center text-white/50 text-sm">
-                Closing position...
-              </div>
-            ) : gridIsActive && state.activePrediction ? (
-              /* Watching: position info + close button */
-              <div className="flex flex-col gap-2 p-3">
-                {/* Position info row */}
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className={`text-sm font-bold ${state.activePrediction.direction === 'long' ? 'text-green-400' : 'text-red-400'}`}>
-                      {state.activePrediction.direction.toUpperCase()} {state.activePrediction.leverage}x
-                    </span>
-                    <span className="text-xs text-white/40">
-                      @ ${state.activePrediction.entryPrice.toFixed(4)}
-                    </span>
-                  </div>
-                  <div className="text-right">
-                    {gridPnl !== null && (
-                      <span className={`text-sm font-bold font-mono ${gridPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                        {gridPnl >= 0 ? '+' : ''}${gridPnl.toFixed(2)} ({gridPnlPercent?.toFixed(1)}%)
-                      </span>
-                    )}
-                  </div>
-                </div>
-
-                {/* Health gauge */}
-                <div className="flex justify-center">
-                  <MarginHealthGauge riskRatio={marginPosition?.riskRatio ?? 2.0} visible={true} />
-                </div>
-
-                {/* Close error */}
-                {closeError && (
-                  <div className="text-center text-xs text-red-400/80">
-                    Close failed — approve wallet to close position
-                  </div>
-                )}
-
-                {/* Status + Close button */}
-                {targetReached ? (
-                  <button
-                    onClick={handleGridClose}
-                    className="w-full py-2.5 rounded-xl text-sm font-medium bg-green-500/20 text-green-300 hover:bg-green-500/30 border border-green-500/30 transition-colors"
-                  >
-                    Target reached! Close to collect
-                  </button>
-                ) : timerExpired ? (
-                  <button
-                    onClick={handleGridClose}
-                    className="w-full py-2.5 rounded-xl text-sm font-medium bg-yellow-500/20 text-yellow-300 hover:bg-yellow-500/30 border border-yellow-500/30 transition-colors"
-                  >
-                    Expired — Close Position (Approve Wallet)
-                  </button>
-                ) : (
-                  <button
-                    onClick={handleGridClose}
-                    className="w-full py-2.5 rounded-xl text-sm font-medium bg-white/10 text-white/70 hover:bg-white/15 transition-colors"
-                  >
-                    Close Position
-                  </button>
-                )}
-              </div>
-            ) : (
-              /* Idle: Balance + Leverage + Stake */
-              <div className="flex flex-col gap-2 p-3">
-                <div className="flex items-center justify-between">
-                  <BalancePill
-                    baseBalance={baseBalance}
-                    quoteBalance={quoteBalance}
-                    baseCoin={selectedPool.baseCoin}
-                    quoteCoin={selectedPool.quoteCoin}
-                    isLoading={balanceLoading}
-                    isConnected={!!currentAccount}
-                  />
-                  <StakeSelector stake={stake} stakes={STAKES} onStakeChange={setStake} />
-                </div>
-                <div className="flex justify-center">
-                  <LeverageSelector
-                    leverage={state.selectedLeverage}
-                    poolKey={selectedPool.poolKey as MarginPoolKey}
-                    onChange={setLeverage}
-                  />
-                </div>
-              </div>
-            )}
+            </div>
           </div>
         )}
       </div>
@@ -675,13 +471,10 @@ function TapTradeContent() {
             timeStepMs={TIME_STEP_MS}
             historyWindowMs={HISTORY_WINDOW_MS}
             bets={bets}
-            canBuy={!!currentAccount && !!currentPoolManagerId && state.quickTradeState === 'idle'}
-            canSell={!!currentAccount && !!currentPoolManagerId && state.quickTradeState === 'idle'}
-            onCellClick={state.quickTradeState !== 'idle' ? () => {} : handleCellClick}
-            activePrediction={state.activePrediction}
-            quickTradeState={state.quickTradeState}
+            canBuy={predictionBalance >= stake}
+            canSell={predictionBalance >= stake}
+            onCellClick={handleCellClick}
             predictionMode="grid"
-            selectedLeverage={state.selectedLeverage}
           />
         ) : (
           /* Quick mode: show chart without grid overlay */
@@ -705,8 +498,8 @@ function TapTradeContent() {
         )}
       </div>
 
-      {/* ResultReveal overlay */}
-      {state.quickTradeState === 'result' && state.activePrediction && (
+      {/* ResultReveal overlay (Quick Trade only) */}
+      {isQuickMode && state.quickTradeState === 'result' && state.activePrediction && (
         <ResultReveal
           round={state.activePrediction}
           xpEarned={0}
@@ -720,6 +513,10 @@ function TapTradeContent() {
       <BottomNav currentView={state.currentView} onViewChange={handleViewChange} isAuthenticated={!!currentAccount} />
     </div>
   )
+}
+
+function formatMultiplier(mult: number): string {
+  return `${mult.toFixed(2)}x`
 }
 
 export default function SwipeBookPage() {

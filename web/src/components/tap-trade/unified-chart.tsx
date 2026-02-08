@@ -2,7 +2,7 @@
 
 import type React from "react"
 import { useEffect, useRef, useState, useCallback } from "react"
-import { calculateMultiplier, formatMultiplier, calculateLeveragedMultiplier } from "@/lib/tap-trade/multipliers"
+import { calculateMultiplier, formatMultiplier } from "@/lib/tap-trade/multipliers"
 import type { PriceTick } from "@/lib/tap-trade/binance"
 import type { Bet } from "@/lib/tap-trade/betting"
 import type { PredictionMode, PredictionRound, QuickTradeState } from "@/context/SwipeBookContext"
@@ -273,15 +273,10 @@ export function UnifiedChart({
             const isAffordable = isBuyCell ? canBuy : canSell
 
             if (predictionMode === 'grid' && !isTooClose) {
-              // Grid mode: direction-based colored cells
+              // Grid mode: direction-based colored cells with multiplier labels
               const direction = cellCenterPrice > (currentPrice ?? 0) ? 'long' : 'short';
-              const leveragedMult = calculateLeveragedMultiplier(
-                currentPrice ?? 1,
-                cellCenterPrice,
-                selectedLeverage,
-              );
-              const intensity = Math.min(leveragedMult / 30, 1);
-              const baseAlpha = isAffordable ? 0.1 + intensity * 0.4 : 0.04 + intensity * 0.12;
+              const intensity = Math.min(multiplier / 5, 1);
+              const baseAlpha = isAffordable ? 0.08 + intensity * 0.3 : 0.03 + intensity * 0.1;
               const alpha = baseAlpha.toFixed(2);
 
               if (direction === 'long') {
@@ -296,15 +291,13 @@ export function UnifiedChart({
               const cellLeftX2 = getX(currentSlotStart + col * timeStepMs);
               ctx.fillRect(cellLeftX2, cellTopY2, cellWidth, cellBottomY2 - cellTopY2);
 
-              // Multiplier label
-              if (leveragedMult >= 1) {
-                const textAlpha = isAffordable ? 0.8 : 0.35;
-                ctx.fillStyle = `rgba(255, 255, 255, ${textAlpha})`;
-                ctx.font = isMobile ? "8px monospace" : "10px monospace";
-                ctx.textAlign = "center";
-                ctx.textBaseline = "middle";
-                ctx.fillText(`${leveragedMult.toFixed(1)}%`, cellCenterX, cellCenterY);
-              }
+              // Multiplier label — always show
+              const textAlpha = isAffordable ? 0.8 : 0.35;
+              ctx.fillStyle = `rgba(255, 255, 255, ${textAlpha})`;
+              ctx.font = isMobile ? "8px monospace" : "10px monospace";
+              ctx.textAlign = "center";
+              ctx.textBaseline = "middle";
+              ctx.fillText(formatMultiplier(multiplier), cellCenterX, cellCenterY);
 
               // Hover highlight for grid mode
               if (isHovered) {

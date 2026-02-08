@@ -9,6 +9,7 @@ interface BalancePillProps {
   quoteCoin: string
   isLoading?: boolean
   isConnected?: boolean
+  predictionBalance?: number | null
 }
 
 function fmt(n: number): string {
@@ -17,10 +18,12 @@ function fmt(n: number): string {
   return n.toFixed(4)
 }
 
-export function BalancePill({ baseBalance, quoteBalance, baseCoin, quoteCoin, isLoading, isConnected }: BalancePillProps) {
+export function BalancePill({ baseBalance, quoteBalance, baseCoin, quoteCoin, isLoading, isConnected, predictionBalance }: BalancePillProps) {
   let display: string
   if (!isConnected) {
     display = "Connect wallet"
+  } else if (predictionBalance != null) {
+    display = `$${predictionBalance.toFixed(2)} prediction`
   } else if (isLoading) {
     display = "..."
   } else {
