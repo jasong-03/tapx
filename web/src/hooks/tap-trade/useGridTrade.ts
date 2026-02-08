@@ -1,5 +1,8 @@
 /**
- * Hook encapsulating Grid Trade business logic
+ * Hook encapsulating Grid Trade business logic.
+ * Prediction game: click cell, if price line enters cell = win (stake × multiplier).
+ * Funded by session balance (real deposit via backend API).
+ * Every win/loss triggers a real on-chain SUI transfer with tx hash proof.
  */
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { createBet, checkBetWin, isBetExpired, type Bet } from '@/lib/tap-trade/betting'
@@ -9,33 +12,35 @@ import type { ToastType } from './useToast'
 
 interface UseGridTradeParams {
   currentPrice: number | null
-  predictionBalance: number
+  sessionBalance: number
   stake: number
   priceStep: number
-  setPredictionBalance: (value: number | ((prev: number) => number)) => void
+  onBalanceChange: (delta: number) => void
+  onBetResolved?: (betId: string, result: 'win' | 'loss', stake: number, payout: number) => void
   showToast: (message: string, type: ToastType) => void
 }
 
 export function useGridTrade({
   currentPrice,
-  predictionBalance,
+  sessionBalance,
   stake,
   priceStep,
-  setPredictionBalance,
+  onBalanceChange,
+  onBetResolved,
   showToast,
 }: UseGridTradeParams) {
   const [bets, setBets] = useState<Bet[]>([])
   const betsRef = useRef(bets)
   betsRef.current = bets
 
-  // Cleanup old bets
+  // Cleanup old bets (keep closed bets for 30s for visual feedback)
   useEffect(() => {
     const interval = setInterval(() => {
       const now = Date.now()
       setBets(prevBets =>
         prevBets.filter(bet => {
           if (bet.status === 'open') return true
-          return now - bet.expiresAt < 30000 // Keep closed bets for 30s
+          return now - bet.expiresAt < 30000
         })
       )
     }, 5000)
@@ -43,7 +48,7 @@ export function useGridTrade({
     return () => clearInterval(interval)
   }, [])
 
-  // Auto-resolve bets
+  // Auto-resolve bets: check if price entered cell (win) or time expired (loss)
   useEffect(() => {
     if (!currentPrice) return
 
@@ -58,16 +63,29 @@ export function useGridTrade({
         const updated = prev.map(bet => {
           if (bet.status !== 'open') return bet
 
-          // Check win
+          // Check win: price entered the cell
           if (checkBetWin(bet, price, now)) {
-            balanceDelta += bet.stake * bet.multiplier
+            const payout = bet.stake * bet.multiplier
+            balanceDelta += payout
             effects.celebrateWin()
+            console.log(
+              `%c[WIN] %cBet ${bet.id} | stake=$${bet.stake} × ${bet.multiplier}x = +$${payout.toFixed(2)} | price=${price} hit [${bet.priceMin.toFixed(6)}, ${bet.priceMax.toFixed(6)}] | sending on-chain...`,
+              'color: #00ff00; font-weight: bold',
+              'color: #aaffaa'
+            )
+            onBetResolved?.(bet.id, 'win', bet.stake, payout)
             return { ...bet, status: 'won' as const, hitAt: now }
           }
 
-          // Check expired
+          // Check expired: time ran out without hitting
           if (isBetExpired(bet)) {
             effects.notifyLoss()
+            console.log(
+              `%c[LOST] %cBet ${bet.id} | stake=$${bet.stake} | price=${price} missed [${bet.priceMin.toFixed(6)}, ${bet.priceMax.toFixed(6)}] | sending to house...`,
+              'color: #ff4444; font-weight: bold',
+              'color: #ffaaaa'
+            )
+            onBetResolved?.(bet.id, 'loss', bet.stake, 0)
             return { ...bet, status: 'lost' as const }
           }
 
@@ -75,7 +93,7 @@ export function useGridTrade({
         })
 
         if (balanceDelta !== 0) {
-          setPredictionBalance(prev => prev + balanceDelta)
+          onBalanceChange(balanceDelta)
         }
 
         return updated
@@ -83,7 +101,7 @@ export function useGridTrade({
     }, 500)
 
     return () => clearInterval(interval)
-  }, [currentPrice, setPredictionBalance])
+  }, [currentPrice, onBalanceChange, onBetResolved])
 
   // Handle cell click to place bet
   const handleCellClick = useCallback(
@@ -99,7 +117,7 @@ export function useGridTrade({
     ) => {
       if (!currentPrice) return
 
-      // Check for duplicate bet
+      // Check for duplicate bet on same cell
       const existingBet = betsRef.current.find(
         b =>
           b.betStartTime === betStartTime &&
@@ -113,17 +131,17 @@ export function useGridTrade({
       }
 
       // Check balance
-      if (predictionBalance < stake) {
-        showToast('Insufficient prediction balance', 'error')
+      if (sessionBalance < stake) {
+        showToast('Insufficient balance — deposit more', 'error')
         return
       }
 
       const direction: 'long' | 'short' = absolutePrice >= currentPrice ? 'long' : 'short'
 
-      // Deduct stake
-      setPredictionBalance(prev => prev - stake)
+      // Deduct stake from balance
+      onBalanceChange(-stake)
 
-      // Create bet
+      // Create bet tile for canvas rendering
       const bet = createBet(
         stake,
         multiplier,
@@ -139,12 +157,18 @@ export function useGridTrade({
       setBets(prev => [...prev, bet])
       effects.tap()
 
+      console.log(
+        `%c[BET] %c${direction.toUpperCase()} $${stake} @ ${formatMultiplier(multiplier)} | id=${bet.id} | range=[${priceMin.toFixed(6)}, ${priceMax.toFixed(6)}] | expires=${new Date(expiresAt).toLocaleTimeString()}`,
+        'color: #00ccff; font-weight: bold',
+        'color: #aaddff'
+      )
+
       showToast(
         `${direction === 'long' ? 'Long' : 'Short'} $${stake} @ ${formatMultiplier(multiplier)}`,
         'success'
       )
     },
-    [currentPrice, stake, predictionBalance, priceStep, setPredictionBalance, showToast]
+    [currentPrice, stake, sessionBalance, priceStep, onBalanceChange, showToast]
   )
 
   return {

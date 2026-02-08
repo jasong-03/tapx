@@ -23,7 +23,7 @@ export function BalancePill({ baseBalance, quoteBalance, baseCoin, quoteCoin, is
   if (!isConnected) {
     display = "Connect wallet"
   } else if (predictionBalance != null) {
-    display = `$${predictionBalance.toFixed(2)} prediction`
+    display = `$${predictionBalance.toFixed(2)} margin`
   } else if (isLoading) {
     display = "..."
   } else {

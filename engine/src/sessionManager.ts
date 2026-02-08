@@ -22,12 +22,24 @@ export interface DepositRecord {
   confirmedAt: number;
 }
 
+export interface BetRecord {
+  betId: string;
+  result: 'win' | 'loss';
+  amount: number;
+  recipient: string;
+  txDigest: string;
+  timestamp: number;
+}
+
 export interface UserSession {
   balance: number;
   totalDeposited: number;
   totalWithdrawn: number;
+  totalLost: number;
+  totalWon: number;
   activePosition: ActivePosition | null;
   deposits: DepositRecord[];
+  bets: BetRecord[];
 }
 
 class SessionManager {
@@ -41,8 +53,11 @@ class SessionManager {
         balance: 0,
         totalDeposited: 0,
         totalWithdrawn: 0,
+        totalLost: 0,
+        totalWon: 0,
         activePosition: null,
         deposits: [],
+        bets: [],
       };
       this.sessions.set(address, session);
     }
@@ -100,6 +115,36 @@ class SessionManager {
     }
     session.balance -= amount;
     session.totalWithdrawn += amount;
+  }
+
+  recordWin(address: string, betId: string, payout: number, txDigest: string): BetRecord {
+    const session = this.getSession(address);
+    const record: BetRecord = {
+      betId,
+      result: 'win',
+      amount: payout,
+      recipient: address,
+      txDigest,
+      timestamp: Date.now(),
+    };
+    session.totalWon += payout;
+    session.bets.push(record);
+    return record;
+  }
+
+  recordLoss(address: string, betId: string, stake: number, houseAddress: string, txDigest: string): BetRecord {
+    const session = this.getSession(address);
+    const record: BetRecord = {
+      betId,
+      result: 'loss',
+      amount: stake,
+      recipient: houseAddress,
+      txDigest,
+      timestamp: Date.now(),
+    };
+    session.totalLost += stake;
+    session.bets.push(record);
+    return record;
   }
 
   hasActivePosition(address: string): boolean {

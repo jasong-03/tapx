@@ -20,6 +20,7 @@ import { buildMarginTxWithPythRefresh, warmPythCache, getCachedPythVaa } from '.
 import { getPool, getMarginPoolKeys, getNetwork, type SuiNetwork } from './pools.js';
 
 const GAS_BUDGET = 250_000_000; // explicit gas budget to skip simulation round-trip
+const SUI_DECIMALS = 9;
 
 export class TradeServer {
   private app: express.Express;
@@ -27,11 +28,13 @@ export class TradeServer {
   private keypair: Ed25519Keypair;
   private dbClient!: DeepBookClient;
   private marginManagerId: string;
+  private houseAddress: string;
   private port: number;
 
   constructor(opts: {
     privateKey: string;
     marginManagerId: string;
+    houseAddress: string;
     port?: number;
     rpcUrl?: string;
   }) {
@@ -42,6 +45,7 @@ export class TradeServer {
     });
     this.keypair = Ed25519Keypair.fromSecretKey(opts.privateKey);
     this.marginManagerId = opts.marginManagerId;
+    this.houseAddress = opts.houseAddress;
     this.port = opts.port ?? 3001;
 
     this.app = express();
@@ -94,6 +98,7 @@ export class TradeServer {
         botAddress: this.keypair.toSuiAddress(),
         network: getNetwork(),
         marginManagerId: this.marginManagerId,
+        houseAddress: this.houseAddress,
       });
     });
 
@@ -104,8 +109,13 @@ export class TradeServer {
         balance: session.balance,
         totalDeposited: session.totalDeposited,
         totalWithdrawn: session.totalWithdrawn,
+        totalLost: session.totalLost,
+        totalWon: session.totalWon,
         activePosition: session.activePosition,
         depositCount: session.deposits.length,
+        deposits: session.deposits,
+        bets: session.bets,
+        houseAddress: this.houseAddress,
       });
     });
 
@@ -346,6 +356,57 @@ export class TradeServer {
       }
     });
 
+    // Resolve bet — real SUI transfer on-chain
+    // WIN:  bot → user wallet (payout = stake × multiplier)
+    // LOSS: bot → house address (stake)
+    this.app.post('/api/bet/resolve', async (req, res) => {
+      try {
+        const { senderAddress, betId, result, stake, payout } = req.body;
+        if (!senderAddress || !betId || !result || !stake) {
+          res.status(400).json({ error: 'Missing senderAddress, betId, result, or stake' });
+          return;
+        }
+
+        const isWin = result === 'win';
+        const transferAmount = isWin ? (payout || stake) : stake;
+        const recipient = isWin ? senderAddress : this.houseAddress;
+        const rawAmount = BigInt(Math.round(transferAmount * Math.pow(10, SUI_DECIMALS)));
+
+        // Build SUI transfer PTB
+        const tx = new Transaction();
+        const [coin] = tx.splitCoins(tx.gas, [rawAmount]);
+        tx.transferObjects([coin], recipient);
+
+        const digest = await this.signAndExecute(tx);
+
+        // Record in session
+        if (isWin) {
+          sessionManager.recordWin(senderAddress, betId, transferAmount, digest);
+          console.log(
+            `[bet/WIN] tx=${digest} | $${transferAmount} → user:${senderAddress.slice(0, 10)}... | betId=${betId}`
+          );
+        } else {
+          sessionManager.recordLoss(senderAddress, betId, stake, this.houseAddress, digest);
+          console.log(
+            `[bet/LOSS] tx=${digest} | $${stake} → house:${this.houseAddress.slice(0, 10)}... | betId=${betId}`
+          );
+        }
+
+        res.json({
+          success: true,
+          digest,
+          result,
+          amount: transferAmount,
+          recipient,
+          betId,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[bet/resolve] ERROR: ${msg}`);
+        res.status(500).json({ error: msg });
+      }
+    });
+
     // Withdraw funds back to user wallet
     this.app.post('/api/withdraw', async (req, res) => {
       try {
@@ -396,6 +457,7 @@ export class TradeServer {
         console.log(`[TradeServer] Bot address: ${this.keypair.toSuiAddress()}`);
         console.log(`[TradeServer] MarginManager: ${this.marginManagerId}`);
         console.log(`[TradeServer] Network: ${getNetwork()}`);
+        console.log(`[TradeServer] House: ${this.houseAddress}`);
         resolve();
       });
     });

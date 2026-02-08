@@ -2,17 +2,13 @@
 
 **Tap a price grid, execute real DeFi trades on Sui.**
 
-TapX is a mobile-first trading interface built on DeepBook (Sui's native order book). Instead of complex order forms, users tap cells on an interactive price grid to instantly execute on-chain market orders.
+TapX is a mobile-first trading interface built on DeepBook (Sui's native order book). Instead of complex order forms, users tap cells on an interactive price grid to instantly execute on-chain market orders. A session-based margin trading engine enables leveraged predictions with take-profit/stop-loss automation.
 
 Built for [HackMoney 2026](https://hackmoney.xyz) | Powered by [Sui](https://sui.io) and [DeepBook](https://deepbook.tech)
 
-## Key Features
+---
 
-### Landing Page
-- **Animated Hero**: Eye-catching hero section with floating avatars and neon grid
-- **Feature Showcase**: Interactive cards highlighting Tap-to-Trade, Margin, and Vaults
-- **Live Stats**: Animated counters showing pool count, FPS, and supported tokens
-- **CTA to Trade**: Direct links to SwipeBook and simulation mode
+## Key Features
 
 ### Tap-to-Trade Interface (SwipeBook)
 - **Interactive Price Grid**: Real-time canvas chart with tap-to-trade cells
@@ -25,31 +21,41 @@ Built for [HackMoney 2026](https://hackmoney.xyz) | Powered by [Sui](https://sui
 - **Leveraged Positions**: 2x, 3x, or 5x leverage selection
 - **Countdown Timeframes**: 15-second, 30-second, or 1-minute rounds
 - **Real-time PnL**: Live profit/loss tracking during open positions
-- **Round History**: Track your last 50 prediction outcomes
+- **TPSL Orders**: Take-profit/stop-loss via DeepBook conditional orders
+- **Positions Dashboard**: View all active margin positions with close buttons
+
+### Grid Trade Mode
+- **Price Grid Predictions**: Grid of price cells with multiplier-based payouts
+- **Separate Route**: Dedicated `/swipebook/grid` route
+- **Shared Infrastructure**: Uses same margin engine as Quick Trade
+
+### Session-Based Trading Engine
+- **HTTP Trade API**: Express server with deposit, open, settle, close endpoints
+- **Automated TPSL**: Engine manages take-profit/stop-loss orders
+- **Pyth VAA Caching**: Background oracle refresh for low-latency execution
 
 ### Simulation Mode
 - **Risk-free Demo**: Toggle to a simulated trading environment ($10,000 fake balance)
 - **Identical UI**: Same interface as live trading for realistic practice
 - **No On-chain Cost**: Trades execute locally without blockchain transactions
-- **Visual Indicator**: Clear banner differentiates demo from live mode
 
 ### DeepBook Integration
 - **On-chain Order Book**: Direct swaps on Sui's native CLOB
-- **Real-time Prices**: 3-second polling with visual interpolation
-- **22 Trading Pairs**: SUI/USDC, DEEP/USDC, WAL/USDC, NS/USDC, and more
-- **Wallet Balance**: Live balance display from connected wallet
+- **Real-time Prices**: 800ms polling with visual interpolation
+- **16+ Trading Pairs**: SUI/USDC, DEEP/USDC, WAL/USDC, NS/USDC, and more
 
 ### Gamification
 - **XP System**: Earn experience points per trade (100 levels)
 - **Streaks**: Daily trading streak tracking with multipliers (1x-2x)
 - **Leaderboard**: Compete with other traders (weekly/all-time)
-- **Achievements**: Unlock badges for milestones
+- **Achievements**: 20 unlockable badges across 7 categories
 
 ### AMM Vault (DeepMaker)
 - **Liquidity Provision**: Deposit base/quote assets into managed vaults
 - **LP Tokens (DRIP)**: Receive proportional share tokens (9 decimals)
 - **Automated Market Making**: Engine bot places spread orders around mid-price
-- **Inventory Skewing**: Dynamic order adjustment based on asset balance
+
+---
 
 ## Tech Stack
 
@@ -60,7 +66,9 @@ Built for [HackMoney 2026](https://hackmoney.xyz) | Powered by [Sui](https://sui
 | **Wallet** | @mysten/dapp-kit-react |
 | **Data** | TanStack Query v5, React Context, localStorage |
 | **UI** | shadcn/ui (Radix), Framer Motion, Lucide Icons |
-| **Engine** | Node.js, @mysten/deepbook-v3 SDK |
+| **Engine** | Node.js, Express 5.2.1, @mysten/deepbook-v3 SDK |
+
+---
 
 ## Quick Start
 
@@ -88,59 +96,81 @@ NEXT_PUBLIC_PRICE_ID_DEEP_USD=29bdd5248234e33bd93d3b81100b5fa32eaa5997843847e2c2
 cd web && npm run dev
 # Open http://localhost:3000 (landing page)
 # Trading UI at http://localhost:3000/swipebook
+# Grid Trade at http://localhost:3000/swipebook/grid
 # Vault page at http://localhost:3000/vault
 ```
 
-### 4. Market Maker Bot (Optional)
+### 4. Engine (Market Maker + Trade Server)
 
 ```bash
 cd engine && npm install
+
+# One-time setup: create MarginManager
+npm run setup
+
 # Configure engine/.env.local (see engine/.env.example)
+# Required: PRIVATE_KEY, MARGIN_MANAGER_ID, BALANCE_MANAGER_ID, etc.
+
 npm run dev
+# Starts MarketMaker (AMM spread bot) + TradeServer (port 3001)
 ```
+
+---
 
 ## How It Works
 
-0. **Explore Landing Page**: Visit `/` to see the product overview, feature showcase, and live stats
+0. **Explore Landing Page**: Visit `/` to see the product overview and feature showcase
 1. **Connect Wallet**: Click "Connect Wallet" to link your Sui wallet
 2. **Select Pool**: Choose trading pair from dropdown (SUI/USDC default)
 3. **Set Stake**: Pick trade size ($1, $5, or $10)
 4. **Tap to Trade**:
-   - Tap cell **above** current price -> **BUY** (quote -> base)
-   - Tap cell **below** current price -> **SELL** (base -> quote)
+   - Tap cell **above** current price -- **BUY** (quote to base)
+   - Tap cell **below** current price -- **SELL** (base to quote)
 5. **Confirm**: Sign transaction in wallet popup
 6. **Done**: Trade executes on DeepBook, balance updates
 
 **Quick Trade Mode**: Select leverage (2x/3x/5x), choose a timeframe (15s/30s/1m), and tap UP or DOWN to predict price direction. Watch your PnL in real-time as the countdown runs.
 
+**Grid Trade Mode**: Navigate to `/swipebook/grid` and tap price cells on the grid to predict where the price will go, with multiplier-based payouts.
+
 **Simulation Mode**: Toggle the demo switch to practice with $10,000 in fake funds. The UI is identical to live trading, but no transactions are submitted on-chain.
+
+---
 
 ## Project Structure
 
 ```
 tapx/
-├── web/                    # Next.js 15 frontend (~140+ files)
+├── web/                    # Next.js 15 frontend (~170+ files)
 │   └── src/
-│       ├── app/            # Pages (landing, swipebook, vault, leaderboard, profile)
-│       ├── components/     # UI components (~65 files)
-│       │   ├── landing/   # Animated landing page (hero, features, stats)
-│       │   ├── swipebook/  # Trading UI, card stack, signals
+│       ├── app/            # 7 routes (landing, swipebook, grid, vault, etc.)
+│       ├── components/     # UI components (~70 files)
+│       │   ├── landing/    # Animated landing page (hero, features, stats)
+│       │   ├── swipebook/  # Trading UI, positions dashboard, signals
 │       │   ├── tap-trade/  # Canvas chart, margin controls, predictions
+│       │   │   └── shared/ # ViewLayout, TradingLayout (shared layouts)
 │       │   ├── gamification/ # XP bar, streaks, achievements
 │       │   └── ui/         # shadcn/ui primitives
-│       ├── hooks/          # React hooks (~25 files)
-│       │   └── swipebook/  # Trade, margin, simulation, pool hooks
-│       ├── lib/            # Utilities (~40 files)
+│       ├── hooks/          # React hooks (~35 files)
+│       │   ├── tap-trade/  # Price streams, quick/grid trade, sessions
+│       │   └── swipebook/  # Trade, margin, positions, debt detection
+│       ├── lib/            # Utilities (~38 files)
 │       │   ├── deepbook/   # SDK integration, margin config/transactions
+│       │   ├── tap-trade/  # Constants, formatters, effects, trade API
 │       │   ├── simulation/ # Demo mode engine, storage, presets
-│       │   ├── signals/    # RSI, MACD, risk scoring
-│       │   └── gamification/ # XP, streaks, achievements
+│       │   └── signals/    # RSI, MACD, risk scoring
 │       └── context/        # SwipeBook global state (~50 reducer actions)
 │
-├── engine/                 # Market maker bot (TypeScript/Node.js)
-│   └── src/
-│       ├── index.ts        # Entry point, vault bootstrap
-│       ├── marketMaker.ts  # Spread order loop, balance monitoring
+├── engine/                 # Market maker + trade server (Node.js/TypeScript)
+│   └── src/                # 11 source files
+│       ├── index.ts        # Dual-mode: MarketMaker + TradeServer
+│       ├── server.ts       # Express API (6 endpoints, port 3001)
+│       ├── sessionManager.ts # In-memory per-user session tracking
+│       ├── marginOps.ts    # DeepBook V3 margin transaction builders
+│       ├── pythRefresh.ts  # Pyth VAA caching (3s refresh, 5s TTL)
+│       ├── marketMaker.ts  # AMM spread order bot
+│       ├── pools.ts        # Pool configs, margin-enabled pools
+│       ├── setup.ts        # One-time MarginManager creation
 │       ├── config.ts       # Environment configuration
 │       └── types.ts        # Type definitions, 18 mainnet pools
 │
@@ -151,10 +181,27 @@ tapx/
 │   └── token/              # DRIP LP token (9 decimals)
 │       └── sources/drip.move
 │
-└── docs/                   # Project documentation
+└── docs/                   # Project documentation (gitignored)
 ```
 
-## Supported Pools (22 Mainnet)
+---
+
+## Engine API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/health` | Service status + bot address |
+| GET | `/api/session/:address` | User balance, deposits, position info |
+| POST | `/api/deposit/confirm` | Verify on-chain deposit, credit session |
+| POST | `/api/trade/open` | Open margin position with TP/SL orders |
+| POST | `/api/trade/settle` | Execute TP/SL trigger and close position |
+| POST | `/api/trade/close` | Close position early (manual exit) |
+
+---
+
+## Supported Pools
+
+### Mainnet (16 pairs)
 
 | Pool | Base | Quote |
 |------|------|-------|
@@ -166,19 +213,18 @@ tapx/
 | NS/USDC | NS | USDC |
 | NS/SUI | NS | SUI |
 
-Additional mainnet pools: WUSDT/USDC, WUSDC/USDC, BETH/USDC, TYPUS/SUI, SUI/AUSD, AUSD/USDC, DRF/SUI, SEND/USDC, XBTC/USDC, NAVX/SUI, CETUS/SUI, TURBOS/SUI, AFSUI/SUI, HASUI/SUI, VSUI/SUI
+Additional mainnet pools: WUSDT/USDC, WUSDC/USDC, BETH/USDC, TYPUS/SUI, SUI/AUSD, AUSD/USDC, DRF/SUI, SEND/USDC, XBTC/USDC
 
-## Testnet Pools (7)
+### Testnet (7 pairs)
 
-| Pool | Base | Quote |
-|------|------|-------|
-| SUI/DBUSDC | SUI | DBUSDC |
-| DEEP/SUI | DEEP | SUI |
-| DEEP/DBUSDC | DEEP | DBUSDC |
-| DBUSDT/DBUSDC | DBUSDT | DBUSDC |
-| WAL/DBUSDC | WAL | DBUSDC |
-| WAL/SUI | WAL | SUI |
-| DBTC/DBUSDC | DBTC | DBUSDC |
+SUI/DBUSDC, DEEP/SUI, DEEP/DBUSDC, DBUSDT/DBUSDC, WAL/DBUSDC, WAL/SUI, DBTC/DBUSDC
+
+### Margin-Enabled
+
+- **Mainnet**: SUI_USDC (5x), DEEP_USDC (3x), DEEP_SUI (3x)
+- **Testnet**: SUI_DBUSDC (5x), DEEP_SUI (3x), DEEP_DBUSDC (3x), DBTC_DBUSDC (3x)
+
+---
 
 ## Smart Contracts (Mainnet)
 
@@ -186,6 +232,8 @@ Additional mainnet pools: WUSDT/USDC, WUSDC/USDC, BETH/USDC, TYPUS/SUI, SUI/AUSD
 |----------|-----------|
 | AMM Vault (`deepbookamm`) | `0x180823228df40d9889a3b918a78248b43a9740e6b346402064762275ba761777` |
 | DRIP Token | `0x9d38bc4d25492d7bf10afdedaf67450de14ec4faa6c89131aa3e4f5b2f00e82b` |
+
+---
 
 ## Development
 
@@ -199,7 +247,8 @@ npm run lint        # ESLint
 
 # Engine
 cd engine
-npm run dev         # Run market maker
+npm run setup       # One-time MarginManager creation
+npm run dev         # Run market maker + trade server
 npm run build       # Compile TypeScript
 npm run typecheck   # Type checking
 
@@ -208,6 +257,8 @@ cd packages/amm
 sui move test       # Run Move tests
 ```
 
+---
+
 ## Documentation
 
 See [`docs/`](./docs/) for detailed documentation:
@@ -215,6 +266,8 @@ See [`docs/`](./docs/) for detailed documentation:
 - [Codebase Summary](./docs/codebase-summary.md) - File tree, data flows, dependencies, and environment variables
 - [Code Standards](./docs/code-standards.md) - Naming conventions, patterns, and coding guidelines
 - [System Architecture](./docs/system-architecture.md) - Architecture diagrams, data flow, security, and deployment
+
+---
 
 ## License
 

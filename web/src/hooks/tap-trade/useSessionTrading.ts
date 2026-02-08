@@ -15,8 +15,8 @@ interface UseSessionTradingReturn {
   isLoadingSession: boolean;
   botAddress: string | null;
 
-  // Deposit
-  deposit: (amount: number, quoteType: string, quoteDecimals: number) => Promise<void>;
+  // Deposit (returns tx digest)
+  deposit: (amount: number, quoteType: string, quoteDecimals: number) => Promise<string>;
   isDepositing: boolean;
 
   // Trade functions (no wallet signing!)
@@ -99,8 +99,8 @@ export function useSessionTrading(): UseSessionTradingReturn {
     };
   }, [address, refreshSession]);
 
-  // Deposit: user transfers quote coin to bot address (signs ONCE)
-  const deposit = useCallback(async (amount: number, quoteType: string, quoteDecimals: number) => {
+  // Deposit: user transfers quote coin to bot address (signs ONCE), returns tx digest
+  const deposit = useCallback(async (amount: number, quoteType: string, quoteDecimals: number): Promise<string> => {
     if (!address || !botAddress) throw new Error('Not connected or bot not available');
 
     setIsDepositing(true);
@@ -157,6 +157,7 @@ export function useSessionTrading(): UseSessionTradingReturn {
       });
 
       setSession((prev) => prev ? { ...prev, balance: confirmation.balance } : prev);
+      return result.digest;
     } finally {
       setIsDepositing(false);
     }

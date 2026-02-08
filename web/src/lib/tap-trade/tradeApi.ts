@@ -2,10 +2,27 @@
 
 const BASE_URL = process.env.NEXT_PUBLIC_TRADE_API_URL || 'http://localhost:3001';
 
+export interface DepositRecord {
+  txDigest: string;
+  amount: number;
+  confirmedAt: number;
+}
+
+export interface BetRecord {
+  betId: string;
+  result: 'win' | 'loss';
+  amount: number;
+  recipient: string;
+  txDigest: string;
+  timestamp: number;
+}
+
 export interface SessionInfo {
   balance: number;
   totalDeposited: number;
   totalWithdrawn: number;
+  totalLost: number;
+  totalWon: number;
   activePosition: {
     poolKey: string;
     direction: 'long' | 'short';
@@ -21,6 +38,9 @@ export interface SessionInfo {
     openedAt: number;
   } | null;
   depositCount: number;
+  deposits: DepositRecord[];
+  bets: BetRecord[];
+  houseAddress: string;
 }
 
 export interface OpenTradeRequest {
@@ -48,6 +68,16 @@ export interface HealthInfo {
   botAddress: string;
   network: string;
   marginManagerId: string;
+  houseAddress: string;
+}
+
+export interface ResolveBetResponse {
+  success: boolean;
+  digest: string;
+  result: 'win' | 'loss';
+  amount: number;
+  recipient: string;
+  betId: string;
 }
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
@@ -106,6 +136,19 @@ export const tradeApi = {
     return apiFetch('/api/trade/close', {
       method: 'POST',
       body: JSON.stringify({ senderAddress, currentPrice }),
+    });
+  },
+
+  resolveBet(params: {
+    senderAddress: string;
+    betId: string;
+    result: 'win' | 'loss';
+    stake: number;
+    payout?: number;
+  }): Promise<ResolveBetResponse> {
+    return apiFetch('/api/bet/resolve', {
+      method: 'POST',
+      body: JSON.stringify(params),
     });
   },
 
