@@ -172,7 +172,7 @@ export function buildOpenLongOps(
       clientOrderId: nextClientOrderId(),
       isBid: true,
       quantity: baseQuantity,
-      payWithDeep: false,
+      payWithDeep: true,
     })(tx);
   };
 
@@ -219,7 +219,7 @@ export function buildOpenShortOps(
       clientOrderId: nextClientOrderId(),
       isBid: false,
       quantity: borrowBase,
-      payWithDeep: false,
+      payWithDeep: true,
     })(tx);
   };
 
@@ -249,7 +249,7 @@ export function buildClosePositionOps(
       clientOrderId: nextClientOrderId(),
       isBid: !params.isLong, // reverse to close
       quantity: params.quantity,
-      payWithDeep: false,
+      payWithDeep: true,
     })(tx);
 
     // 2. Repay borrowed amounts (omit amount to repay all)
@@ -311,7 +311,7 @@ export function buildMarginLimitOrderOps(
       isBid: params.direction === 'long',
       price: params.targetPrice,
       quantity: baseQuantity,
-      payWithDeep: false,
+      payWithDeep: true,
     })(tx);
   };
 }
