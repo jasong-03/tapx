@@ -272,7 +272,7 @@ export function UnifiedChart({
             const isBuyCell = cellCenterPrice >= (currentPrice ?? 0)
             const isAffordable = isBuyCell ? canBuy : canSell
 
-            if (predictionMode === 'grid' && !isTooClose && isAffordable) {
+            if (predictionMode === 'grid' && !isTooClose) {
               // Grid mode: direction-based colored cells
               const direction = cellCenterPrice > (currentPrice ?? 0) ? 'long' : 'short';
               const leveragedMult = calculateLeveragedMultiplier(
@@ -281,7 +281,8 @@ export function UnifiedChart({
                 selectedLeverage,
               );
               const intensity = Math.min(leveragedMult / 30, 1);
-              const alpha = (0.1 + intensity * 0.4).toFixed(2);
+              const baseAlpha = isAffordable ? 0.1 + intensity * 0.4 : 0.04 + intensity * 0.12;
+              const alpha = baseAlpha.toFixed(2);
 
               if (direction === 'long') {
                 ctx.fillStyle = `rgba(0, 255, 136, ${alpha})`;
@@ -297,7 +298,8 @@ export function UnifiedChart({
 
               // Multiplier label
               if (leveragedMult >= 1) {
-                ctx.fillStyle = "rgba(255, 255, 255, 0.8)";
+                const textAlpha = isAffordable ? 0.8 : 0.35;
+                ctx.fillStyle = `rgba(255, 255, 255, ${textAlpha})`;
                 ctx.font = isMobile ? "8px monospace" : "10px monospace";
                 ctx.textAlign = "center";
                 ctx.textBaseline = "middle";
@@ -313,7 +315,7 @@ export function UnifiedChart({
                 const cellLeftX3 = getX(currentSlotStart + col * timeStepMs);
                 ctx.strokeRect(cellLeftX3, cellTopY3, cellWidth, cellBottomY3 - cellTopY3);
               }
-            } else {
+            } else if (!isTooClose || predictionMode !== 'grid') {
               // Quick mode — direction-colored cells
               const isLong = cellCenterPrice > (currentPrice ?? 0);
               if (isTooClose) {
@@ -490,30 +492,62 @@ export function UnifiedChart({
         ctx.fill()
         ctx.shadowBlur = 0
 
-        if (tileW > 30 && tileH > 20) {
-          ctx.fillStyle = bet.status === "lost" ? "rgba(255, 255, 255, 0.5)" : "#000"
-          ctx.font = "bold 12px sans-serif"
-          ctx.textAlign = "center"
-          ctx.textBaseline = "middle"
-          const centerX = tileX + tileW / 2
-          const centerY = tileY + tileH / 2
+        // Adaptive text rendering based on tile size
+        const centerX = tileX + tileW / 2
+        const centerY = tileY + tileH / 2
+        ctx.textAlign = "center"
+        ctx.textBaseline = "middle"
 
-          if (tileH > 35) {
-            ctx.fillText(`$${bet.stake}`, centerX, centerY - 6)
-            ctx.font = "10px monospace"
-            ctx.fillText(formatMultiplier(bet.multiplier), centerX, centerY + 8)
+        if (tileW > 20 && tileH > 40) {
+          // Large tile: three lines — status, stake, multiplier
+          const textColor = bet.status === "lost" ? "rgba(255, 255, 255, 0.6)" : "#000"
+          if (bet.status === "won") {
+            ctx.fillStyle = "#000"
+            ctx.font = "bold 11px sans-serif"
+            ctx.fillText("WIN!", centerX, centerY - 12)
+            ctx.fillStyle = "#000"
+            ctx.font = "bold 10px sans-serif"
+            ctx.fillText(`+$${(bet.stake * bet.multiplier).toFixed(1)}`, centerX, centerY + 2)
+            ctx.font = "9px monospace"
+            ctx.fillText(formatMultiplier(bet.multiplier), centerX, centerY + 14)
+          } else if (bet.status === "lost") {
+            ctx.fillStyle = "rgba(255, 255, 255, 0.7)"
+            ctx.font = "bold 11px sans-serif"
+            ctx.fillText("LOST", centerX, centerY - 8)
+            ctx.font = "9px monospace"
+            ctx.fillStyle = "rgba(255, 255, 255, 0.5)"
+            ctx.fillText(`-$${bet.stake}`, centerX, centerY + 6)
           } else {
-            ctx.fillText(`$${bet.stake}`, centerX, centerY)
+            ctx.fillStyle = textColor
+            ctx.font = "bold 11px sans-serif"
+            ctx.fillText(`$${bet.stake}`, centerX, centerY - 6)
+            ctx.font = "9px monospace"
+            ctx.fillText(formatMultiplier(bet.multiplier), centerX, centerY + 8)
           }
-
+        } else if (tileW > 16 && tileH > 14) {
+          // Small tile: one or two lines
           if (bet.status === "won") {
             ctx.fillStyle = "#000"
             ctx.font = "bold 9px sans-serif"
-            ctx.fillText("WIN!", centerX, tileY + tileH - 8)
+            ctx.fillText("WIN!", centerX, tileH > 24 ? centerY - 5 : centerY)
+            if (tileH > 24) {
+              ctx.font = "8px monospace"
+              ctx.fillText(`+$${(bet.stake * bet.multiplier).toFixed(1)}`, centerX, centerY + 7)
+            }
           } else if (bet.status === "lost") {
-            ctx.fillStyle = "rgba(255, 255, 255, 0.6)"
+            ctx.fillStyle = "rgba(255, 255, 255, 0.7)"
             ctx.font = "bold 9px sans-serif"
-            ctx.fillText("LOST", centerX, tileY + tileH - 8)
+            ctx.fillText("LOST", centerX, centerY)
+          } else {
+            ctx.fillStyle = "#000"
+            ctx.font = "bold 9px sans-serif"
+            if (tileH > 24) {
+              ctx.fillText(`$${bet.stake}`, centerX, centerY - 5)
+              ctx.font = "8px monospace"
+              ctx.fillText(formatMultiplier(bet.multiplier), centerX, centerY + 7)
+            } else {
+              ctx.fillText(`$${bet.stake}`, centerX, centerY)
+            }
           }
         }
       }

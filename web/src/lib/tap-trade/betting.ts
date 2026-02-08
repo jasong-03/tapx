@@ -13,6 +13,7 @@ export interface Bet {
   row: number
   col: number
   hitAt?: number
+  direction?: 'long' | 'short'
 }
 
 export function createBet(
@@ -24,6 +25,7 @@ export function createBet(
   betStartTime: number,
   row: number,
   col: number,
+  direction?: 'long' | 'short',
 ): Bet {
   return {
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
@@ -37,6 +39,7 @@ export function createBet(
     status: "open",
     row,
     col,
+    direction,
   }
 }
 

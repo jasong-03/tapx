@@ -9,6 +9,7 @@ import { MARGIN_POOL_KEYS, type MarginPoolKey } from '@/lib/deepbook/margin-conf
 import type { MarginManager } from '@mysten/deepbook-v3';
 
 const STORAGE_PREFIX = 'tapx_margin_manager';
+const MANAGER_UPDATED_EVENT = 'tapx-margin-manager-updated';
 
 function getManagerStorageKey(address: string, poolKey: string): string {
   return `${STORAGE_PREFIX}_${address}_${poolKey}`;
@@ -32,6 +33,15 @@ function saveManagerId(address: string, poolKey: string, managerId: string): voi
   }
 }
 
+function loadAllManagerIds(address: string): Record<string, string> {
+  const ids: Record<string, string> = {};
+  for (const poolKey of MARGIN_POOL_KEYS) {
+    const id = loadManagerId(address, poolKey);
+    if (id) ids[poolKey] = id;
+  }
+  return ids;
+}
+
 interface UseMarginManagerReturn {
   managerId: string | null;
   isCreating: boolean;
@@ -51,20 +61,23 @@ export function useMarginManager(): UseMarginManagerReturn {
 
   const address = currentAccount?.address;
 
-  // Load all stored manager IDs on mount
+  // Load all stored manager IDs on mount / wallet change
   useEffect(() => {
     if (!address) {
       setManagerIds({});
       return;
     }
+    setManagerIds(loadAllManagerIds(address));
+  }, [address]);
 
-    const ids: Record<string, string> = {};
-    const poolKeys = MARGIN_POOL_KEYS;
-    for (const poolKey of poolKeys) {
-      const id = loadManagerId(address, poolKey);
-      if (id) ids[poolKey] = id;
-    }
-    setManagerIds(ids);
+  // Listen for manager updates from other hook instances (same tab)
+  useEffect(() => {
+    if (!address) return;
+    const handler = () => {
+      setManagerIds(loadAllManagerIds(address));
+    };
+    window.addEventListener(MANAGER_UPDATED_EVENT, handler);
+    return () => window.removeEventListener(MANAGER_UPDATED_EVENT, handler);
   }, [address]);
 
   // Current active manager ID (first available)
@@ -134,6 +147,9 @@ export function useMarginManager(): UseMarginManagerReturn {
 
       saveManagerId(address, poolKey, createdId);
       setManagerIds((prev) => ({ ...prev, [poolKey]: createdId }));
+
+      // Notify other hook instances (e.g. useMarginTradeExecution) to reload
+      window.dispatchEvent(new Event(MANAGER_UPDATED_EVENT));
 
       return createdId;
     } finally {

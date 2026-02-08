@@ -138,6 +138,18 @@ export function useMarginTradeExecution(): UseMarginTradeReturn {
     try {
       const managerKey = `${params.poolKey}_MGR`;
 
+      // Align close quantity to lot_size (on-chain balance may not be
+      // exactly lot-aligned due to rounding in devInspect parsing)
+      const bookParams = await queryPoolBookParams(suiClient, params.poolKey);
+      const lotSize = bookParams.lotSize;
+      const alignedQuantity = lotSize > 0
+        ? Math.floor(params.quantity / lotSize) * lotSize
+        : params.quantity;
+
+      if (alignedQuantity <= 0) {
+        throw new Error('Position too small to close');
+      }
+
       const tx = await buildMarginTxWithPythRefresh(
         params.poolKey,
         currentAccount.address,
@@ -145,7 +157,7 @@ export function useMarginTradeExecution(): UseMarginTradeReturn {
           buildClosePositionOps(marginClient, {
             poolKey: params.poolKey,
             managerKey,
-            quantity: params.quantity,
+            quantity: alignedQuantity,
             isLong: params.isLong,
           })(t);
         },
