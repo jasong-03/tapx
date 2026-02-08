@@ -1,6 +1,6 @@
 "use client"
 
-import { createContext, useContext, useReducer, useMemo, useCallback, type ReactNode } from 'react';
+import { createContext, useContext, useReducer, useEffect, useMemo, useCallback, type ReactNode } from 'react';
 import type {
   SwipeBookState,
   SwipeBookAction,
@@ -13,6 +13,56 @@ import type { TradingSignal, RiskScore } from '@/lib/signals/types';
 import type { SocialSignals } from '@/lib/social/types';
 import type { UserProgress } from '@/lib/gamification/types';
 import type { LeverageValue, TimeframeValue, TargetPercentValue } from '@/lib/deepbook/margin-config';
+
+// ── localStorage persistence for active positions ──
+const POSITION_STORAGE_PREFIX = 'tapx_active_position';
+
+function getPositionStorageKey(): string {
+  // Include wallet address if available from margin manager storage
+  // This prevents cross-wallet position restoration
+  if (typeof window === 'undefined') return POSITION_STORAGE_PREFIX;
+  try {
+    const addr = localStorage.getItem('tapx_active_wallet');
+    return addr ? `${POSITION_STORAGE_PREFIX}_${addr}` : POSITION_STORAGE_PREFIX;
+  } catch {
+    return POSITION_STORAGE_PREFIX;
+  }
+}
+
+function saveActivePosition(prediction: PredictionRound | null, tradeState: QuickTradeState, walletAddress?: string): void {
+  if (typeof window === 'undefined') return;
+  try {
+    if (walletAddress) {
+      localStorage.setItem('tapx_active_wallet', walletAddress);
+    }
+    const key = walletAddress ? `${POSITION_STORAGE_PREFIX}_${walletAddress}` : getPositionStorageKey();
+    if (prediction && (tradeState === 'watching' || tradeState === 'triggered')) {
+      localStorage.setItem(key, JSON.stringify({ prediction, tradeState }));
+    } else {
+      localStorage.removeItem(key);
+    }
+  } catch { /* ignore */ }
+}
+
+function loadActivePosition(): { prediction: PredictionRound; tradeState: QuickTradeState } | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const key = getPositionStorageKey();
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    // Validate critical numeric fields to prevent NaN in PnL calculations
+    const p = parsed?.prediction;
+    if (!p || !parsed?.tradeState) return null;
+    if (!Number.isFinite(p.entryPrice) || !Number.isFinite(p.collateral) ||
+        !Number.isFinite(p.leverage) || !Number.isFinite(p.baseQuantity)) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
 
 // Prediction round types
 export type PredictionDirection = 'long' | 'short';
@@ -90,7 +140,8 @@ type ExtendedSwipeBookAction =
   | { type: 'SET_MARGIN_MANAGER'; payload: string | null }
   | { type: 'SET_TARGET_PERCENT'; payload: TargetPercentValue }
   | { type: 'SET_GRID_ORDER_ID'; payload: string | null }
-  | { type: 'SET_SIMULATION_MODE'; payload: boolean };
+  | { type: 'SET_SIMULATION_MODE'; payload: boolean }
+  | { type: 'RESTORE_POSITION'; payload: { prediction: PredictionRound; tradeState: QuickTradeState } };
 
 const initialState: ExtendedSwipeBookState = {
   currentView: 'swipe',
@@ -229,6 +280,12 @@ function swipeBookReducer(state: ExtendedSwipeBookState, action: ExtendedSwipeBo
       return { ...state, activeGridOrderId: action.payload };
     case 'SET_SIMULATION_MODE':
       return { ...state, simulationMode: action.payload };
+    case 'RESTORE_POSITION':
+      return {
+        ...state,
+        activePrediction: action.payload.prediction,
+        quickTradeState: action.payload.tradeState,
+      };
     default:
       return state;
   }
@@ -281,6 +338,19 @@ const SwipeBookContext = createContext<SwipeBookContextValue | null>(null);
 
 export function SwipeBookProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(swipeBookReducer, initialState);
+
+  // Restore active position from localStorage on mount
+  useEffect(() => {
+    const saved = loadActivePosition();
+    if (saved) {
+      dispatch({ type: 'RESTORE_POSITION', payload: saved });
+    }
+  }, []);
+
+  // Persist active position to localStorage when it changes
+  useEffect(() => {
+    saveActivePosition(state.activePrediction, state.quickTradeState);
+  }, [state.activePrediction, state.quickTradeState]);
 
   // Compute current pool's data
   const currentPool = state.pools[state.currentPoolIndex] || null;
