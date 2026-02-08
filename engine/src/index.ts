@@ -1,5 +1,7 @@
 
 import { MarketMaker } from "./marketMaker.js";
+import { TradeServer } from "./server.js";
+import { setNetwork, type SuiNetwork } from "./pools.js";
 import { Vault } from "./types.js";
 
 const vaults: Vault[] = [{
@@ -10,14 +12,40 @@ const vaults: Vault[] = [{
 }]
 
 async function main() {
-  const marketMaker = new MarketMaker(vaults);
-  
   process.on("SIGINT", () => {
-    console.log("Shutting down market maker...");
+    console.log("Shutting down...");
     process.exit(0);
   });
 
-  await marketMaker.run();
+  // Start trade API server if configured
+  const marginManagerId = process.env.MARGIN_MANAGER_ID;
+  const privateKey = process.env.PRIVATE_KEY;
+
+  if (marginManagerId && privateKey) {
+    const network = (process.env.SUI_NETWORK || 'testnet') as SuiNetwork;
+    setNetwork(network);
+
+    const server = new TradeServer({
+      privateKey,
+      marginManagerId,
+      port: parseInt(process.env.API_PORT || '3001'),
+      rpcUrl: process.env.RPC_URL,
+    });
+    await server.start();
+    console.log("Trade API server started");
+  } else {
+    console.log("MARGIN_MANAGER_ID not set, skipping trade API server");
+  }
+
+  // Start market maker only if AMM config is present
+  if (process.env.AMM_PACKAGE_ID) {
+    const marketMaker = new MarketMaker(vaults);
+    await marketMaker.run();
+  } else {
+    console.log("AMM_PACKAGE_ID not set, skipping market maker");
+    // Keep process alive for the trade server
+    await new Promise(() => {});
+  }
 }
 
 main().catch(console.error);

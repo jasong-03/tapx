@@ -8,9 +8,12 @@
     "dev": "dotenv -e .env.local -- tsx src/index.ts",
     "build": "tsc",
     "watch": "tsx watch src/index.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "setup": "dotenv -e .env.local -- tsx src/setup.ts"
   },
   "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
     "@types/node": "^24.0.1",
     "dotenv-cli": "^8.0.0",
     "tsx": "^4.19.0",
@@ -19,6 +22,8 @@
   "dependencies": {
     "@mysten/deepbook-v3": "^1.0.0",
     "@mysten/sui": "^2.0.1",
-    "dotenv": "^16.5.0"
+    "cors": "^2.8.6",
+    "dotenv": "^16.5.0",
+    "express": "^5.2.1"
   }
 }
