@@ -28,6 +28,7 @@ async function main() {
     const server = new TradeServer({
       privateKey,
       marginManagerId,
+      houseAddress: process.env.HOUSE_ADDRESS || '0xdead351072a02c063158bdb1e9c5c1ddfc1337ff58e89a3d0625e0c104dbb35c',
       port: parseInt(process.env.API_PORT || '3001'),
       rpcUrl: process.env.RPC_URL,
     });
