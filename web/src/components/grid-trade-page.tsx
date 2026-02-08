@@ -13,7 +13,7 @@ import { StakeSelector } from "@/components/tap-trade/stake-selector"
 import { UnifiedChart } from "@/components/tap-trade/unified-chart"
 import { Toast } from "@/components/tap-trade/toast"
 import { TileScaler } from "@/components/tap-trade/tile-scaler"
-import { useDeepBookPriceStream } from "@/hooks/tap-trade/useDeepBookPriceStream"
+import { usePythPriceStream } from "@/hooks/tap-trade/usePythPriceStream"
 import { useTokenBalances } from "@/hooks/tap-trade/useTokenBalances"
 import { usePredictionBalance } from "@/hooks/tap-trade/usePredictionBalance"
 import { useGridTrade } from "@/hooks/tap-trade/useGridTrade"
@@ -35,7 +35,7 @@ function GridTradeContent() {
   const [selectedPool, setSelectedPool] = useState<Pool>(allPools[0])
 
   // Price stream
-  const { priceHistory, currentPrice, isConnected } = useDeepBookPriceStream(selectedPool)
+  const { priceHistory, currentPrice, isConnected } = usePythPriceStream(selectedPool)
 
   // Token balances
   const { quoteBalance, baseBalance, isLoading: balanceLoading } = useTokenBalances(selectedPool)

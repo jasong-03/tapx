@@ -19,7 +19,8 @@ import { ModeToggle } from "@/components/tap-trade/ModeToggle"
 import { QuickTradeControls } from "@/components/tap-trade/QuickTradeControls"
 import { RoundHistory } from "@/components/tap-trade/RoundHistory"
 import { ResultReveal } from "@/components/tap-trade/ResultReveal"
-import { useDeepBookPriceStream } from "@/hooks/tap-trade/useDeepBookPriceStream"
+import { PredictionOverlay } from "@/components/tap-trade/PredictionOverlay"
+import { usePythPriceStream } from "@/hooks/tap-trade/usePythPriceStream"
 import { useUserBalance } from "@/hooks/useUserBalance"
 import { useMarginManager } from "@/hooks/swipebook/useMarginManager"
 import { useMarginPosition } from "@/hooks/swipebook/useMarginPosition"
@@ -87,8 +88,8 @@ function TapTradeContent() {
   const allPools = getSwipeBookPools()
   const [selectedPool, setSelectedPool] = useState<Pool>(allPools[0])
 
-  // DeepBook price stream
-  const { priceHistory, currentPrice, isConnected } = useDeepBookPriceStream(selectedPool)
+  // Pyth oracle price stream (real mainnet prices, fluctuates naturally)
+  const { priceHistory, currentPrice, isConnected } = usePythPriceStream(selectedPool)
 
   // Real wallet balances
   const { data: quoteBalanceData, isLoading: quoteLoading } = useUserBalance(selectedPool.quoteType)
@@ -102,7 +103,7 @@ function TapTradeContent() {
   const balanceLoading = quoteLoading || baseLoading
 
   // Margin manager (for Quick Trade mode)
-  const { managerIds, isCreating, createManager } = useMarginManager()
+  const { managerId, isCreating, createManager, managerIds, marginManagers } = useMarginManager()
   const currentPoolManagerId = managerIds[selectedPool.poolKey] ?? null
 
   // Determine direction from active prediction for margin position query
@@ -439,10 +440,9 @@ function TapTradeContent() {
                 stake={stake}
                 stakes={STAKES}
                 onStakeChange={setStake}
-                quoteCoin={selectedPool.quoteCoin}
+                marginManagers={marginManagers}
                 riskRatio={marginPosition?.riskRatio}
                 marginPosition={marginPosition}
-                managerId={currentPoolManagerId}
               />
             )}
           </div>
@@ -490,24 +490,45 @@ function TapTradeContent() {
             predictionMode="grid"
           />
         ) : (
-          /* Quick mode: show chart without grid overlay */
-          <UnifiedChart
-            priceHistory={priceHistory}
-            currentPrice={currentPrice}
-            rows={ROWS}
-            cols={COLS}
-            priceStep={priceStep}
-            timeStepMs={TIME_STEP_MS}
-            historyWindowMs={HISTORY_WINDOW_MS}
-            bets={[]}
-            canBuy={false}
-            canSell={false}
-            onCellClick={() => {}}
-            activePrediction={state.activePrediction}
-            quickTradeState={state.quickTradeState}
-            predictionMode="quick"
-            selectedLeverage={state.selectedLeverage}
-          />
+          /* Quick mode: chart with prediction overlay */
+          <div className="relative h-full w-full">
+            <UnifiedChart
+              priceHistory={priceHistory}
+              currentPrice={currentPrice}
+              rows={ROWS}
+              cols={COLS}
+              priceStep={priceStep}
+              timeStepMs={TIME_STEP_MS}
+              historyWindowMs={HISTORY_WINDOW_MS}
+              bets={[]}
+              canBuy={false}
+              canSell={false}
+              onCellClick={() => {}}
+            />
+            {/* Prediction overlay shown during active trade (watching + triggered + closing + settling) */}
+            {state.activePrediction && ['watching', 'triggered', 'closing', 'settling'].includes(state.quickTradeState) && (
+              <PredictionOverlay
+                entryPrice={state.activePrediction.entryPrice}
+                currentPrice={currentPrice}
+                direction={state.activePrediction.direction}
+                tpPrice={state.activePrediction.tpPrice}
+                slPrice={state.activePrediction.slPrice}
+                triggeredSide={state.activePrediction.triggeredSide}
+                timeframe={state.activePrediction.timeframe}
+                startedAt={state.activePrediction.startedAt}
+              />
+            )}
+            {/* Result overlay on chart */}
+            {state.quickTradeState === 'result' && state.activePrediction && (
+              <PredictionOverlay
+                entryPrice={state.activePrediction.entryPrice}
+                currentPrice={currentPrice}
+                direction={state.activePrediction.direction}
+                isResult={true}
+                isWin={state.activePrediction.result === 'win'}
+              />
+            )}
+          </div>
         )}
       </div>
 

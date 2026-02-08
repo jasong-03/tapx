@@ -29,7 +29,7 @@ export function useQuickTrade({
     setLeverage,
   } = useSwipeBook()
 
-  const { managerIds, isCreating, createManager } = useMarginManager()
+  const { managerIds, isCreating, createManager, marginManagers } = useMarginManager()
   const currentPoolManagerId = managerIds[selectedPool.poolKey] ?? null
 
   // Check if pool supports margin trading
@@ -102,6 +102,7 @@ export function useQuickTrade({
     currentPoolManagerId,
     isCreatingManager: isCreating,
     poolSupportsMargin,
+    marginManagers,
 
     // Position data
     marginPosition,
