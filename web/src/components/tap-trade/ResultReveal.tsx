@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useState } from 'react';
+import confetti from 'canvas-confetti';
 import type { PredictionRound } from '@/context/SwipeBookContext';
 
 interface ResultRevealProps {
@@ -22,12 +23,23 @@ export function ResultReveal({ round, xpEarned, onComplete }: ResultRevealProps)
     return () => timers.forEach(clearTimeout);
   }, [onComplete]);
 
-  // Haptic feedback
+  // Haptic feedback + confetti for wins
   useEffect(() => {
     if (navigator.vibrate) {
       if (round.result === 'win') navigator.vibrate([50, 30, 100]);
       else if (round.result === 'liquidated') navigator.vibrate([200, 100, 200]);
       else navigator.vibrate([100, 50, 100]);
+    }
+
+    // Fire confetti on win
+    if (round.result === 'win') {
+      confetti({
+        particleCount: 100,
+        spread: 80,
+        origin: { y: 0.5 },
+        colors: ['#22c55e', '#a3e635', '#facc15', '#22d3ee'],
+        disableForReducedMotion: true,
+      });
     }
   }, [round.result]);
 
@@ -46,6 +58,16 @@ export function ResultReveal({ round, xpEarned, onComplete }: ResultRevealProps)
         transition-transform duration-500
         ${phase >= 1 ? 'scale-100' : 'scale-50'}
       `}>
+        {/* Money Distributed / Result banner */}
+        <div className={`
+          text-lg font-black tracking-widest uppercase
+          ${isWin ? 'text-green-400' : isLiquidated ? 'text-yellow-400' : 'text-red-400'}
+          ${phase === 0 ? 'opacity-0 -translate-y-4' : 'opacity-100 translate-y-0'}
+          transition-all duration-500
+        `}>
+          {isWin ? 'Money Distributed!' : isLiquidated ? 'Liquidated' : 'Better Luck Next Time'}
+        </div>
+
         {/* PnL number */}
         <div className={`
           text-5xl font-black tabular-nums
@@ -53,7 +75,7 @@ export function ResultReveal({ round, xpEarned, onComplete }: ResultRevealProps)
           ${phase === 0 ? 'scale-0' : 'scale-100'}
           transition-transform duration-500
         `}>
-          {round.pnl !== undefined && round.pnl >= 0 ? '+' : ''}${round.pnl?.toFixed(2) ?? '0.00'}
+          {round.pnl !== undefined && round.pnl >= 0 ? '+' : ''}{round.pnlPercent?.toFixed(1) ?? '0.0'}%
         </div>
 
         {/* Direction + leverage */}
@@ -62,7 +84,7 @@ export function ResultReveal({ round, xpEarned, onComplete }: ResultRevealProps)
           transition-opacity duration-300
           ${phase >= 1 ? 'opacity-100' : 'opacity-0'}
         `}>
-          {round.direction.toUpperCase()} {round.leverage}x &middot; {round.pnlPercent?.toFixed(1)}%
+          {round.direction.toUpperCase()} {round.leverage}x &middot; ${round.pnl !== undefined ? (round.pnl >= 0 ? '+' : '') + round.pnl.toFixed(4) : '0.00'}
         </div>
 
         {/* XP earned */}
@@ -73,13 +95,6 @@ export function ResultReveal({ round, xpEarned, onComplete }: ResultRevealProps)
         `}>
           +{xpEarned} XP
         </div>
-
-        {/* Result label */}
-        {isLiquidated && (
-          <div className="text-yellow-400 font-black text-2xl tracking-widest animate-pulse">
-            LIQUIDATED
-          </div>
-        )}
       </div>
     </div>
   );

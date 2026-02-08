@@ -92,6 +92,37 @@ export const TIMEFRAME_OPTIONS = [
 
 export type TimeframeValue = (typeof TIMEFRAME_OPTIONS)[number]['value'];
 
+// Target percent options for TPSL Quick Trade
+export const TARGET_PERCENT_OPTIONS = [
+  { value: 2 as const, label: '+2%', slPercent: 2 },
+  { value: 3 as const, label: '+3%', slPercent: 3 },
+  { value: 5 as const, label: '+5%', slPercent: 5 },
+  { value: 10 as const, label: '+10%', slPercent: 5 },
+  { value: 20 as const, label: '+20%', slPercent: 10 },
+] as const;
+
+export type TargetPercentValue = (typeof TARGET_PERCENT_OPTIONS)[number]['value'];
+
+// Calculate TP and SL prices from entry price, direction, and target percent
+export function calculateTPSLPrices(
+  entryPrice: number,
+  direction: 'long' | 'short',
+  targetPercent: number,
+  slPercent: number,
+): { tpPrice: number; slPrice: number } {
+  if (direction === 'long') {
+    return {
+      tpPrice: entryPrice * (1 + targetPercent / 100),
+      slPrice: entryPrice * (1 - slPercent / 100),
+    };
+  }
+  // Short: TP when price drops, SL when price rises
+  return {
+    tpPrice: entryPrice * (1 - targetPercent / 100),
+    slPrice: entryPrice * (1 + slPercent / 100),
+  };
+}
+
 // Get max leverage for a given pool
 export function getMaxLeverage(poolKey: MarginPoolKey): LeverageValue {
   const pool = (MARGIN_POOLS as Record<string, { maxLeverage: number }>)[poolKey];

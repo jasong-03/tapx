@@ -8,6 +8,7 @@ import type { DeepBookClient } from '@mysten/deepbook-v3';
 import type { SuiJsonRpcClient } from '@mysten/sui/jsonRpc';
 import { getPool } from './pools';
 import { DEEPBOOK_PACKAGE_ID, DUMMY_SENDER } from './config';
+import { prependPythPriceUpdate } from './pyth-refresh';
 
 interface OpenPositionOpsParams {
   poolKey: string;
@@ -57,7 +58,7 @@ const MIN_BASE_QUANTITY = 0.000001; // minimum base amount for market orders
  * Since the SDK does `Math.round(quantity * baseCoin.scalar)`, we need to
  * ensure the human-readable quantity is a clean multiple of lotSize.
  */
-function alignToLotSize(quantity: number, lotSize: number): number {
+export function alignToLotSize(quantity: number, lotSize: number): number {
   if (lotSize <= 0) return quantity;
   return Math.floor(quantity / lotSize) * lotSize;
 }
@@ -228,31 +229,47 @@ export function buildOpenShortOps(
 
 /**
  * Build close position operations (curried).
- * Flow: market order (reverse direction) → repay debt → withdraw settled amounts
+ * Flow: market order → repay debt → withdraw settled amounts
  *
- * Uses a regular placeMarketOrder instead of placeReduceOnlyMarketOrder.
- * The reduce-only variant aborts with ENotReduceOnlyOrder (code 3) when the
- * quote output from selling all base exceeds the net quote debt — which is
- * always the case for profitable longs (and even at breakeven, because
- * collateral was converted to base). A regular market sell + explicit repay
- * achieves the same result without the over-strict constraint.
+ * When asset >= debt on the closing side, reduce-only orders fail (error 3).
+ * Pass `useReduceOnly: false` to use a regular market order instead.
+ *
+ * IMPORTANT: Only repay the side that was actually borrowed. Calling repay_base
+ * on a long (which only borrows quote) triggers EIncorrectMarginPool (error 10).
  */
 export function buildClosePositionOps(
   dbClient: DeepBookClient,
-  params: ClosePositionOpsParams,
+  params: ClosePositionOpsParams & { useReduceOnly?: boolean },
 ): (tx: Transaction) => void {
-  return (tx: Transaction) => {
-    // 1. Market order in reverse direction to unwind position
-    dbClient.poolProxy.placeMarketOrder({
-      poolKey: params.poolKey,
-      marginManagerKey: params.managerKey,
-      clientOrderId: nextClientOrderId(),
-      isBid: !params.isLong, // reverse to close
-      quantity: params.quantity,
-      payWithDeep: true,
-    })(tx);
+  const useReduceOnly = params.useReduceOnly ?? true;
 
-    // 2. Repay borrowed amounts (omit amount to repay all)
+  return (tx: Transaction) => {
+    // 1. Market order to close (reverse direction)
+    // Skip if quantity is 0 (baseAsset < lotSize) — just repay + withdraw
+    if (params.quantity > 0) {
+      if (useReduceOnly) {
+        dbClient.poolProxy.placeReduceOnlyMarketOrder({
+          poolKey: params.poolKey,
+          marginManagerKey: params.managerKey,
+          clientOrderId: nextClientOrderId(),
+          isBid: !params.isLong,
+          quantity: params.quantity,
+          payWithDeep: true,
+        })(tx);
+      } else {
+        dbClient.poolProxy.placeMarketOrder({
+          poolKey: params.poolKey,
+          marginManagerKey: params.managerKey,
+          clientOrderId: nextClientOrderId(),
+          isBid: !params.isLong,
+          quantity: params.quantity,
+          payWithDeep: true,
+        })(tx);
+      }
+    }
+
+    // 2. Repay only the borrowed side (long borrows quote, short borrows base)
+    // Calling repay on the wrong side causes EIncorrectMarginPool (error 10)
     if (params.isLong) {
       dbClient.marginManager.repayQuote(params.managerKey)(tx);
     } else {
@@ -331,5 +348,312 @@ export function buildCancelOrderOps(
 
     // Withdraw collateral back
     dbClient.poolProxy.withdrawSettledAmounts(params.managerKey)(tx);
+  };
+}
+
+/**
+ * Build force-repay operations to clear all outstanding debt on a pool.
+ * Flow: deposit enough to cover debt → repay → withdraw all settled amounts.
+ * Use this to clear a stuck margin_pool_id (error 4: ECannotHaveLoanInMoreThanOneMarginPool).
+ *
+ * IMPORTANT: The manager may have 0 assets after a failed/partial close. We must
+ * deposit enough to cover the debt BEFORE calling repay — otherwise repay is a
+ * no-op and margin_pool_id stays dirty.
+ *
+ * Only repay the side that has debt to avoid EIncorrectMarginPool (error 10).
+ */
+export function buildForceRepayOps(
+  dbClient: DeepBookClient,
+  params: { poolKey: string; managerKey: string; baseDebt?: number; quoteDebt?: number },
+): (tx: Transaction) => void {
+  return (tx: Transaction) => {
+    if (params.quoteDebt && params.quoteDebt > 0) {
+      // Deposit quote to cover debt + 2% buffer for accrued interest
+      dbClient.marginManager.depositQuote({
+        managerKey: params.managerKey,
+        amount: params.quoteDebt * 1.02,
+      })(tx);
+      dbClient.marginManager.repayQuote(params.managerKey)(tx);
+    }
+    if (params.baseDebt && params.baseDebt > 0) {
+      // Deposit base to cover debt + 2% buffer for accrued interest
+      dbClient.marginManager.depositBase({
+        managerKey: params.managerKey,
+        amount: params.baseDebt * 1.02,
+      })(tx);
+      dbClient.marginManager.repayBase(params.managerKey)(tx);
+    }
+    // Withdraw any settled/remaining amounts (returns deposit surplus + cleared collateral)
+    dbClient.poolProxy.withdrawSettledAmounts(params.managerKey)(tx);
+  };
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// TPSL (Take Profit / Stop Loss) transaction builders
+// ────────────────────────────────────────────────────────────────────────────
+
+interface OpenWithTPSLOpsParams {
+  poolKey: string;
+  managerKey: string;
+  collateral: number;
+  leverage: number;
+  currentPrice: number;
+  lotSize: number;
+  direction: 'long' | 'short';
+  tpPrice: number; // take-profit trigger price
+  slPrice: number; // stop-loss trigger price
+}
+
+/**
+ * Build open position + TP/SL conditional orders in a single PTB.
+ *
+ * Flow:
+ * 1. deposit_quote (collateral)
+ * 2. borrow_quote or borrow_base (leverage)
+ * 3. place_market_order (enter position)
+ * 4. add_conditional_order (TP)
+ * 5. add_conditional_order (SL)
+ *
+ * Returns the baseQuantity and the two conditional order IDs.
+ */
+export function buildOpenWithTPSLOps(
+  dbClient: DeepBookClient,
+  params: OpenWithTPSLOpsParams,
+): { ops: (tx: Transaction) => void; baseQuantity: number; tpOrderId: string; slOrderId: string } {
+  if (!params.currentPrice || params.currentPrice <= 0) {
+    throw new Error('Cannot open position: invalid current price');
+  }
+
+  const isLong = params.direction === 'long';
+  const totalQuote = params.collateral * params.leverage;
+  const borrowAmount = params.collateral * (params.leverage - 1);
+
+  if (totalQuote < MIN_QUOTE_QUANTITY) {
+    throw new Error(`Order quantity too small: ${totalQuote}. Minimum is ${MIN_QUOTE_QUANTITY}.`);
+  }
+
+  let baseQuantity: number;
+  let borrowBase: number | undefined;
+
+  if (isLong) {
+    // Long: borrow quote, buy base
+    const rawBaseQuantity = totalQuote / params.currentPrice;
+    baseQuantity = alignToLotSize(rawBaseQuantity, params.lotSize);
+  } else {
+    // Short: borrow base, sell base
+    const rawBorrowBase = borrowAmount / params.currentPrice;
+    borrowBase = alignToLotSize(rawBorrowBase, params.lotSize);
+    baseQuantity = borrowBase;
+  }
+
+  if (baseQuantity < MIN_BASE_QUANTITY) {
+    throw new Error(`Order base quantity too small: ${baseQuantity}. Increase collateral or leverage.`);
+  }
+
+  // Generate unique conditional order IDs
+  const tpOrderId = nextClientOrderId();
+  const slOrderId = nextClientOrderId();
+
+  const ops = (tx: Transaction) => {
+    // 0. Cancel any orphaned conditional orders from previous failed trades.
+    // Safe to call with 0 existing orders (no-op). Prevents EMaxConditionalOrdersReached (error 3).
+    dbClient.marginTPSL.cancelAllConditionalOrders(params.managerKey)(tx);
+
+    // 1. Deposit collateral (quote)
+    dbClient.marginManager.depositQuote({
+      managerKey: params.managerKey,
+      amount: params.collateral,
+    })(tx);
+
+    // 2. Borrow
+    if (isLong) {
+      if (borrowAmount > 0) {
+        dbClient.marginManager.borrowQuote(params.managerKey, borrowAmount)(tx);
+      }
+    } else {
+      if (borrowBase && borrowBase > 0) {
+        dbClient.marginManager.borrowBase(params.managerKey, borrowBase)(tx);
+      }
+    }
+
+    // 3. Market order (enter position)
+    dbClient.poolProxy.placeMarketOrder({
+      poolKey: params.poolKey,
+      marginManagerKey: params.managerKey,
+      clientOrderId: nextClientOrderId(),
+      isBid: isLong,
+      quantity: baseQuantity,
+      payWithDeep: true,
+    })(tx);
+
+    // 4. Add TP conditional order
+    // Long TP: trigger when price goes ABOVE tpPrice (triggerBelowPrice=false)
+    // Short TP: trigger when price goes BELOW tpPrice (triggerBelowPrice=true)
+    dbClient.marginTPSL.addConditionalOrder({
+      marginManagerKey: params.managerKey,
+      conditionalOrderId: tpOrderId,
+      triggerBelowPrice: !isLong, // Long: false (above), Short: true (below)
+      triggerPrice: params.tpPrice,
+      pendingOrder: {
+        clientOrderId: nextClientOrderId(),
+        quantity: baseQuantity,
+        isBid: !isLong, // Reverse to close: Long close = sell (false), Short close = buy (true)
+        payWithDeep: true,
+      },
+    })(tx);
+
+    // 5. Add SL conditional order
+    // Long SL: trigger when price goes BELOW slPrice (triggerBelowPrice=true)
+    // Short SL: trigger when price goes ABOVE slPrice (triggerBelowPrice=false)
+    dbClient.marginTPSL.addConditionalOrder({
+      marginManagerKey: params.managerKey,
+      conditionalOrderId: slOrderId,
+      triggerBelowPrice: isLong, // Long: true (below), Short: false (above)
+      triggerPrice: params.slPrice,
+      pendingOrder: {
+        clientOrderId: nextClientOrderId(),
+        quantity: baseQuantity,
+        isBid: !isLong, // Same direction as TP (closing)
+        payWithDeep: true,
+      },
+    })(tx);
+  };
+
+  return { ops, baseQuantity, tpOrderId, slOrderId };
+}
+
+/**
+ * Build settle ops after TPSL has been triggered.
+ * Flow: execute conditional orders + cancel remaining + repay + withdraw
+ *
+ * This is called AFTER a TP/SL trigger is detected. The executeConditionalOrders
+ * call is permissionless but we still need the user to sign for repay+withdraw.
+ */
+export function buildSettleTPSLOps(
+  dbClient: DeepBookClient,
+  params: { poolKey: string; managerKey: string; isLong: boolean },
+): (tx: Transaction) => void {
+  return (tx: Transaction) => {
+    // 1. Execute any triggered conditional orders (permissionless, max 10)
+    dbClient.marginTPSL.executeConditionalOrders(params.managerKey, 10)(tx);
+
+    // 2. Cancel any remaining conditional orders (the other side of TP/SL)
+    dbClient.marginTPSL.cancelAllConditionalOrders(params.managerKey)(tx);
+
+    // 3. Repay only the borrowed side (long borrows quote, short borrows base)
+    // Calling repay on the wrong side causes EIncorrectMarginPool (error 10)
+    if (params.isLong) {
+      dbClient.marginManager.repayQuote(params.managerKey)(tx);
+    } else {
+      dbClient.marginManager.repayBase(params.managerKey)(tx);
+    }
+
+    // 4. Withdraw settled amounts back to wallet
+    dbClient.poolProxy.withdrawSettledAmounts(params.managerKey)(tx);
+  };
+}
+
+/**
+ * Build close-early ops: user wants to exit before TP/SL triggers.
+ * Flow: cancel all conditionals + market order + repay + withdraw
+ *
+ * When the margin account's asset exceeds its debt on the closing side
+ * (e.g. quoteAsset > quoteDebt for a long), the reduce-only assertion
+ * (ENotReduceOnlyOrder / error 3) will fail on-chain. In that case,
+ * pass `useReduceOnly: false` to place a regular market order instead.
+ */
+export function buildCloseEarlyOps(
+  dbClient: DeepBookClient,
+  params: { poolKey: string; managerKey: string; quantity: number; isLong: boolean; useReduceOnly?: boolean },
+): (tx: Transaction) => void {
+  const useReduceOnly = params.useReduceOnly ?? true;
+
+  return (tx: Transaction) => {
+    // 1. Cancel all conditional orders first
+    dbClient.marginTPSL.cancelAllConditionalOrders(params.managerKey)(tx);
+
+    // 2. Market order to close position (reverse direction)
+    // Skip if quantity is 0 (baseAsset < lotSize after alignment) — just repay + withdraw
+    if (params.quantity > 0) {
+      if (useReduceOnly) {
+        dbClient.poolProxy.placeReduceOnlyMarketOrder({
+          poolKey: params.poolKey,
+          marginManagerKey: params.managerKey,
+          clientOrderId: nextClientOrderId(),
+          isBid: !params.isLong,
+          quantity: params.quantity,
+          payWithDeep: true,
+        })(tx);
+      } else {
+        dbClient.poolProxy.placeMarketOrder({
+          poolKey: params.poolKey,
+          marginManagerKey: params.managerKey,
+          clientOrderId: nextClientOrderId(),
+          isBid: !params.isLong,
+          quantity: params.quantity,
+          payWithDeep: true,
+        })(tx);
+      }
+    }
+
+    // 3. Repay only the borrowed side (long borrows quote, short borrows base)
+    // Calling repay on the wrong side causes EIncorrectMarginPool (error 10)
+    if (params.isLong) {
+      dbClient.marginManager.repayQuote(params.managerKey)(tx);
+    } else {
+      dbClient.marginManager.repayBase(params.managerKey)(tx);
+    }
+
+    // 4. Withdraw settled amounts
+    dbClient.poolProxy.withdrawSettledAmounts(params.managerKey)(tx);
+  };
+}
+
+/**
+ * Query the on-chain margin manager state (debts & assets) via devInspect.
+ * Used to calculate the correct reduce-only quantity before closing.
+ */
+export async function queryMarginState(
+  client: SuiJsonRpcClient,
+  dbClient: DeepBookClient,
+  managerId: string,
+  poolKey: string,
+): Promise<{ baseAsset: number; quoteAsset: number; baseDebt: number; quoteDebt: number }> {
+  const pool = getPool(poolKey);
+  if (!pool) throw new Error(`Unknown pool: ${poolKey}`);
+
+  const tx = new Transaction();
+  tx.setSenderIfNotSet(DUMMY_SENDER);
+
+  // Pyth price refresh needed for managerState (check_price_is_fresh)
+  await prependPythPriceUpdate(tx, poolKey);
+
+  // SDK query: returns [manager_id, pool_id, risk_ratio, base_asset, quote_asset, base_debt, quote_debt, ...]
+  dbClient.marginManager.managerState(poolKey, managerId)(tx);
+
+  const result = await client.devInspectTransactionBlock({
+    transactionBlock: tx,
+    sender: DUMMY_SENDER,
+  });
+
+  if (!result.results?.length) throw new Error('Failed to query margin state');
+
+  const rv = result.results[result.results.length - 1]?.returnValues;
+  if (!rv || rv.length < 7) throw new Error('Unexpected margin state response');
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const parseU64 = (v: any): number => {
+    if (!v || v[1] !== 'u64') return 0;
+    return Number(bcs.u64().parse(new Uint8Array(v[0])));
+  };
+
+  const baseScalar = Math.pow(10, pool.baseDecimals);
+  const quoteScalar = Math.pow(10, pool.quoteDecimals);
+
+  return {
+    baseAsset: parseU64(rv[3]) / baseScalar,
+    quoteAsset: parseU64(rv[4]) / quoteScalar,
+    baseDebt: parseU64(rv[5]) / baseScalar,
+    quoteDebt: parseU64(rv[6]) / quoteScalar,
   };
 }

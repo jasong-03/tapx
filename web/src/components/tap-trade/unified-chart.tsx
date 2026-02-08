@@ -2,7 +2,7 @@
 
 import type React from "react"
 import { useEffect, useRef, useState, useCallback } from "react"
-import { calculateMultiplier, formatMultiplier } from "@/lib/tap-trade/multipliers"
+import { calculateMultiplier, formatMultiplier, calculateLeveragedMultiplier } from "@/lib/tap-trade/multipliers"
 import type { PriceTick } from "@/lib/tap-trade/binance"
 import type { Bet } from "@/lib/tap-trade/betting"
 import type { PredictionMode, PredictionRound, QuickTradeState } from "@/context/SwipeBookContext"
@@ -203,127 +203,118 @@ export function UnifiedChart({
         }
       }
 
-      // Future vertical grid lines
-      ctx.strokeStyle = "rgba(255, 100, 200, 0.15)"
-      for (let i = 0; i <= cols + 1; i++) {
-        const slotTime = currentSlotStart + i * timeStepMs
-        const x = getX(slotTime)
-        if (x >= nowX - 2 && x <= dimensions.width - padding.right + 2) {
-          ctx.beginPath()
-          ctx.moveTo(x, padding.top)
-          ctx.lineTo(x, padding.top + chartHeight)
-          ctx.stroke()
-        }
-      }
-
-      // Twinkle dots at intersections
-      twinklePhaseRef.current += 0.02
-      let twinkleIndex = 0
-      for (let price = lowestGridPrice; price <= highestGridPrice; price += priceStep) {
-        const y = priceToY(price)
-        if (y < padding.top - 5 || y > padding.top + chartHeight + 5) continue
-
-        for (let col = 0; col <= cols + 1; col++) {
-          const slotTime = currentSlotStart + col * timeStepMs
+      // Future vertical grid lines (grid mode only)
+      if (predictionMode === 'grid') {
+        ctx.strokeStyle = "rgba(255, 100, 200, 0.15)"
+        for (let i = 0; i <= cols + 1; i++) {
+          const slotTime = currentSlotStart + i * timeStepMs
           const x = getX(slotTime)
-
-          if (x >= nowX - 5 && x <= dimensions.width - padding.right + 5) {
-            const twinkle = Math.sin(twinklePhaseRef.current + twinkleIndex * 0.3 + col * 0.5) * 0.3 + 0.5
+          if (x >= nowX - 2 && x <= dimensions.width - padding.right + 2) {
             ctx.beginPath()
-            ctx.arc(x, y, 2, 0, Math.PI * 2)
-            ctx.fillStyle = `rgba(255, 150, 220, ${twinkle * 0.5})`
-            ctx.fill()
+            ctx.moveTo(x, padding.top)
+            ctx.lineTo(x, padding.top + chartHeight)
+            ctx.stroke()
           }
-          twinkleIndex++
+        }
+
+        // Twinkle dots at intersections
+        twinklePhaseRef.current += 0.02
+        let twinkleIndex = 0
+        for (let price = lowestGridPrice; price <= highestGridPrice; price += priceStep) {
+          const y = priceToY(price)
+          if (y < padding.top - 5 || y > padding.top + chartHeight + 5) continue
+
+          for (let col = 0; col <= cols + 1; col++) {
+            const slotTime = currentSlotStart + col * timeStepMs
+            const x = getX(slotTime)
+
+            if (x >= nowX - 5 && x <= dimensions.width - padding.right + 5) {
+              const twinkle = Math.sin(twinklePhaseRef.current + twinkleIndex * 0.3 + col * 0.5) * 0.3 + 0.5
+              ctx.beginPath()
+              ctx.arc(x, y, 2, 0, Math.PI * 2)
+              ctx.fillStyle = `rgba(255, 150, 220, ${twinkle * 0.5})`
+              ctx.fill()
+            }
+            twinkleIndex++
+          }
         }
       }
 
-      // Draw multipliers in grid cells
-      ctx.font = isMobile ? "9px monospace" : "11px monospace"
-      ctx.textAlign = "center"
-      ctx.textBaseline = "middle"
+      // Draw multipliers in grid cells (only in grid mode)
+      if (predictionMode === 'grid') {
+        ctx.font = isMobile ? "9px monospace" : "11px monospace"
+        ctx.textAlign = "center"
+        ctx.textBaseline = "middle"
 
-      const MIN_BET_LEAD_TIME_MS = 5000
+        const MIN_BET_LEAD_TIME_MS = 5000
 
-      for (let price = lowestGridPrice; price < highestGridPrice; price += priceStep) {
-        const cellCenterPrice = price + priceStep / 2
-        const cellTopY = priceToY(price + priceStep)
-        const cellBottomY = priceToY(price)
-        const cellCenterY = (cellTopY + cellBottomY) / 2
+        for (let price = lowestGridPrice; price < highestGridPrice; price += priceStep) {
+          const cellCenterPrice = price + priceStep / 2
+          const cellTopY = priceToY(price + priceStep)
+          const cellBottomY = priceToY(price)
+          const cellCenterY = (cellTopY + cellBottomY) / 2
 
-        if (cellCenterY < padding.top - 20 || cellCenterY > padding.top + chartHeight + 20) continue
+          if (cellCenterY < padding.top - 20 || cellCenterY > padding.top + chartHeight + 20) continue
 
-        const multiplier = calculateMultiplier(currentPrice, cellCenterPrice)
+          for (let col = 0; col < cols; col++) {
+            const slotTime = currentSlotStart + col * timeStepMs
+            const cellLeftX = getX(slotTime)
+            const cellCenterX = cellLeftX + cellWidth / 2
 
-        for (let col = 0; col < cols; col++) {
-          const slotTime = currentSlotStart + col * timeStepMs
-          const cellLeftX = getX(slotTime)
-          const cellCenterX = cellLeftX + cellWidth / 2
+            if (cellCenterX >= nowX && cellCenterX <= dimensions.width - padding.right) {
+              const isTooClose = slotTime - now < MIN_BET_LEAD_TIME_MS
 
-          if (cellCenterX >= nowX && cellCenterX <= dimensions.width - padding.right) {
-            const isTooClose = slotTime - now < MIN_BET_LEAD_TIME_MS
+              const isHovered =
+                hoveredCell &&
+                Math.abs(hoveredCell.absolutePrice - cellCenterPrice) < priceStep / 2 &&
+                hoveredCell.col === col
 
-            const isHovered =
-              hoveredCell &&
-              Math.abs(hoveredCell.absolutePrice - cellCenterPrice) < priceStep / 2 &&
-              hoveredCell.col === col
+              // Determine if this cell's direction is affordable
+              const isBuyCell = cellCenterPrice >= (currentPrice ?? 0)
+              const isAffordable = isBuyCell ? canBuy : canSell
 
-            // Determine if this cell's direction is affordable
-            const isBuyCell = cellCenterPrice >= (currentPrice ?? 0)
-            const isAffordable = isBuyCell ? canBuy : canSell
+              if (!isTooClose && isAffordable) {
+                // Grid mode: direction-based colored cells
+                const direction = cellCenterPrice > (currentPrice ?? 0) ? 'long' : 'short';
+                const leveragedMult = calculateLeveragedMultiplier(
+                  currentPrice ?? 1,
+                  cellCenterPrice,
+                  selectedLeverage,
+                );
+                const intensity = Math.min(leveragedMult / 30, 1);
+                const alpha = (0.1 + intensity * 0.4).toFixed(2);
 
-            if (predictionMode === 'grid' && !isTooClose) {
-              // Grid mode: direction-based colored cells with multiplier labels
-              const direction = cellCenterPrice > (currentPrice ?? 0) ? 'long' : 'short';
-              const intensity = Math.min(multiplier / 5, 1);
-              const baseAlpha = isAffordable ? 0.08 + intensity * 0.3 : 0.03 + intensity * 0.1;
-              const alpha = baseAlpha.toFixed(2);
+                if (direction === 'long') {
+                  ctx.fillStyle = `rgba(0, 255, 136, ${alpha})`;
+                } else {
+                  ctx.fillStyle = `rgba(255, 68, 68, ${alpha})`;
+                }
 
-              if (direction === 'long') {
-                ctx.fillStyle = `rgba(0, 255, 136, ${alpha})`;
-              } else {
-                ctx.fillStyle = `rgba(255, 68, 68, ${alpha})`;
+                // Fill cell background
+                const cellTopY2 = priceToY(price + priceStep);
+                const cellBottomY2 = priceToY(price);
+                const cellLeftX2 = getX(currentSlotStart + col * timeStepMs);
+                ctx.fillRect(cellLeftX2, cellTopY2, cellWidth, cellBottomY2 - cellTopY2);
+
+                // Multiplier label
+                if (leveragedMult >= 1) {
+                  ctx.fillStyle = "rgba(255, 255, 255, 0.8)";
+                  ctx.font = isMobile ? "8px monospace" : "10px monospace";
+                  ctx.textAlign = "center";
+                  ctx.textBaseline = "middle";
+                  ctx.fillText(`${leveragedMult.toFixed(1)}%`, cellCenterX, cellCenterY);
+                }
+
+                // Hover highlight for grid mode
+                if (isHovered) {
+                  ctx.strokeStyle = "rgba(255, 255, 255, 0.6)";
+                  ctx.lineWidth = 1.5;
+                  const cellTopY3 = priceToY(price + priceStep);
+                  const cellBottomY3 = priceToY(price);
+                  const cellLeftX3 = getX(currentSlotStart + col * timeStepMs);
+                  ctx.strokeRect(cellLeftX3, cellTopY3, cellWidth, cellBottomY3 - cellTopY3);
+                }
               }
-
-              // Fill cell background
-              const cellTopY2 = priceToY(price + priceStep);
-              const cellBottomY2 = priceToY(price);
-              const cellLeftX2 = getX(currentSlotStart + col * timeStepMs);
-              ctx.fillRect(cellLeftX2, cellTopY2, cellWidth, cellBottomY2 - cellTopY2);
-
-              // Multiplier label — always show
-              const textAlpha = isAffordable ? 0.8 : 0.35;
-              ctx.fillStyle = `rgba(255, 255, 255, ${textAlpha})`;
-              ctx.font = isMobile ? "8px monospace" : "10px monospace";
-              ctx.textAlign = "center";
-              ctx.textBaseline = "middle";
-              ctx.fillText(formatMultiplier(multiplier), cellCenterX, cellCenterY);
-
-              // Hover highlight for grid mode
-              if (isHovered) {
-                ctx.strokeStyle = "rgba(255, 255, 255, 0.6)";
-                ctx.lineWidth = 1.5;
-                const cellTopY3 = priceToY(price + priceStep);
-                const cellBottomY3 = priceToY(price);
-                const cellLeftX3 = getX(currentSlotStart + col * timeStepMs);
-                ctx.strokeRect(cellLeftX3, cellTopY3, cellWidth, cellBottomY3 - cellTopY3);
-              }
-            } else if (!isTooClose || predictionMode !== 'grid') {
-              // Quick mode — direction-colored cells
-              const isLong = cellCenterPrice > (currentPrice ?? 0);
-              if (isTooClose) {
-                ctx.fillStyle = "rgba(255, 100, 100, 0.15)"
-              } else if (!isAffordable) {
-                ctx.fillStyle = isLong ? "rgba(0, 255, 136, 0.06)" : "rgba(255, 68, 68, 0.06)"
-              } else if (isHovered) {
-                ctx.fillStyle = isLong ? "rgba(0, 255, 136, 0.9)" : "rgba(255, 68, 68, 0.9)"
-              } else {
-                ctx.fillStyle = isLong ? "rgba(0, 255, 136, 0.25)" : "rgba(255, 68, 68, 0.25)"
-              }
-              ctx.font = isMobile ? "9px monospace" : "11px monospace"
-              ctx.textAlign = "center"
-              ctx.textBaseline = "middle"
-              ctx.fillText(formatMultiplier(multiplier), cellCenterX, cellCenterY)
             }
           }
         }

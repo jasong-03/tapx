@@ -12,11 +12,11 @@ import type {
 import type { TradingSignal, RiskScore } from '@/lib/signals/types';
 import type { SocialSignals } from '@/lib/social/types';
 import type { UserProgress } from '@/lib/gamification/types';
-import type { LeverageValue, TimeframeValue } from '@/lib/deepbook/margin-config';
+import type { LeverageValue, TimeframeValue, TargetPercentValue } from '@/lib/deepbook/margin-config';
 
 // Prediction round types
 export type PredictionDirection = 'long' | 'short';
-export type QuickTradeState = 'idle' | 'opening' | 'watching' | 'closing' | 'result';
+export type QuickTradeState = 'idle' | 'opening' | 'watching' | 'triggered' | 'settling' | 'closing' | 'result';
 export type PredictionMode = 'quick' | 'grid';
 
 export interface PredictionRound {
@@ -36,6 +36,13 @@ export interface PredictionRound {
   txDigestOpen?: string;
   txDigestClose?: string;
   result?: 'win' | 'loss' | 'liquidated';
+  // TPSL fields
+  tpPrice?: number;
+  slPrice?: number;
+  tpOrderId?: string;
+  slOrderId?: string;
+  targetPercent?: TargetPercentValue;
+  triggeredSide?: 'tp' | 'sl';
 }
 
 // Extended state interface with margin/prediction features
@@ -51,6 +58,7 @@ interface ExtendedSwipeBookState extends SwipeBookState {
   selectedTimeframe: TimeframeValue;
   selectedLeverage: LeverageValue;
   predictionMode: PredictionMode;
+  selectedTargetPercent: TargetPercentValue;
   roundHistory: PredictionRound[];
   marginManagerId: string | null;
   // Grid mode
@@ -80,6 +88,7 @@ type ExtendedSwipeBookAction =
   | { type: 'SET_PREDICTION_MODE'; payload: PredictionMode }
   | { type: 'ADD_ROUND'; payload: PredictionRound }
   | { type: 'SET_MARGIN_MANAGER'; payload: string | null }
+  | { type: 'SET_TARGET_PERCENT'; payload: TargetPercentValue }
   | { type: 'SET_GRID_ORDER_ID'; payload: string | null }
   | { type: 'SET_SIMULATION_MODE'; payload: boolean };
 
@@ -103,6 +112,7 @@ const initialState: ExtendedSwipeBookState = {
   selectedTimeframe: 30,
   selectedLeverage: 2,
   predictionMode: 'quick',
+  selectedTargetPercent: 10,
   roundHistory: [],
   marginManagerId: null,
   activeGridOrderId: null,
@@ -210,6 +220,8 @@ function swipeBookReducer(state: ExtendedSwipeBookState, action: ExtendedSwipeBo
     }
     case 'SET_MARGIN_MANAGER':
       return { ...state, marginManagerId: action.payload };
+    case 'SET_TARGET_PERCENT':
+      return { ...state, selectedTargetPercent: action.payload };
     case 'SET_GRID_ORDER_ID':
       return { ...state, activeGridOrderId: action.payload };
     case 'SET_SIMULATION_MODE':
@@ -252,6 +264,7 @@ interface SwipeBookContextValue {
   setPredictionMode: (mode: PredictionMode) => void;
   addRound: (round: PredictionRound) => void;
   setMarginManager: (id: string | null) => void;
+  setTargetPercent: (tp: TargetPercentValue) => void;
   setGridOrderId: (id: string | null) => void;
   setSimulationMode: (mode: boolean) => void;
   // Computed values
@@ -320,6 +333,7 @@ export function SwipeBookProvider({ children }: { children: ReactNode }) {
     setPredictionMode: (mode) => dispatch({ type: 'SET_PREDICTION_MODE', payload: mode }),
     addRound: (round) => dispatch({ type: 'ADD_ROUND', payload: round }),
     setMarginManager: (id) => dispatch({ type: 'SET_MARGIN_MANAGER', payload: id }),
+    setTargetPercent: (tp) => dispatch({ type: 'SET_TARGET_PERCENT', payload: tp }),
     setGridOrderId: (id) => dispatch({ type: 'SET_GRID_ORDER_ID', payload: id }),
     setSimulationMode: (mode) => dispatch({ type: 'SET_SIMULATION_MODE', payload: mode }),
     // Computed values
