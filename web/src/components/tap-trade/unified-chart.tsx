@@ -744,7 +744,8 @@ export function UnifiedChart({
           const pnl = activePrediction.direction === 'long'
             ? priceDiff * activePrediction.collateral * activePrediction.leverage / activePrediction.entryPrice
             : -priceDiff * activePrediction.collateral * activePrediction.leverage / activePrediction.entryPrice
-          const pnlText = pnl >= 0 ? `+$${pnl.toFixed(2)}` : `-$${Math.abs(pnl).toFixed(2)}`
+          const pnlDecimals = Math.abs(pnl) < 0.01 ? 4 : 2
+          const pnlText = pnl >= 0 ? `+$${pnl.toFixed(pnlDecimals)}` : `-$${Math.abs(pnl).toFixed(pnlDecimals)}`
           ctx.fillStyle = pnl >= 0 ? "#00ff88" : "#ff4444"
           ctx.font = "bold 24px monospace"
           ctx.textAlign = "center"

@@ -8,6 +8,12 @@ Built for [HackMoney 2026](https://hackmoney.xyz) | Powered by [Sui](https://sui
 
 ## Key Features
 
+### Landing Page
+- **Animated Hero**: Eye-catching hero section with floating avatars and neon grid
+- **Feature Showcase**: Interactive cards highlighting Tap-to-Trade, Margin, and Vaults
+- **Live Stats**: Animated counters showing pool count, FPS, and supported tokens
+- **CTA to Trade**: Direct links to SwipeBook and simulation mode
+
 ### Tap-to-Trade Interface (SwipeBook)
 - **Interactive Price Grid**: Real-time canvas chart with tap-to-trade cells
 - **Instant Execution**: Tap above price to buy, below to sell
@@ -80,7 +86,9 @@ NEXT_PUBLIC_PRICE_ID_DEEP_USD=29bdd5248234e33bd93d3b81100b5fa32eaa5997843847e2c2
 
 ```bash
 cd web && npm run dev
-# Open http://localhost:3000/swipebook
+# Open http://localhost:3000 (landing page)
+# Trading UI at http://localhost:3000/swipebook
+# Vault page at http://localhost:3000/vault
 ```
 
 ### 4. Market Maker Bot (Optional)
@@ -93,6 +101,7 @@ npm run dev
 
 ## How It Works
 
+0. **Explore Landing Page**: Visit `/` to see the product overview, feature showcase, and live stats
 1. **Connect Wallet**: Click "Connect Wallet" to link your Sui wallet
 2. **Select Pool**: Choose trading pair from dropdown (SUI/USDC default)
 3. **Set Stake**: Pick trade size ($1, $5, or $10)
@@ -110,29 +119,30 @@ npm run dev
 
 ```
 tapx/
-├── web/                    # Next.js 15 frontend (~122 files)
+├── web/                    # Next.js 15 frontend (~140+ files)
 │   └── src/
-│       ├── app/            # Pages (home, swipebook, leaderboard, profile)
-│       ├── components/     # UI components (~35 files)
-│       │   ├── swipebook/  # Trading UI, margin controls, simulation toggle
-│       │   ├── tap-trade/  # Canvas chart, controls, overlays
+│       ├── app/            # Pages (landing, swipebook, vault, leaderboard, profile)
+│       ├── components/     # UI components (~65 files)
+│       │   ├── landing/   # Animated landing page (hero, features, stats)
+│       │   ├── swipebook/  # Trading UI, card stack, signals
+│       │   ├── tap-trade/  # Canvas chart, margin controls, predictions
 │       │   ├── gamification/ # XP bar, streaks, achievements
 │       │   └── ui/         # shadcn/ui primitives
-│       ├── hooks/          # React hooks (~22 files)
+│       ├── hooks/          # React hooks (~25 files)
 │       │   └── swipebook/  # Trade, margin, simulation, pool hooks
-│       ├── lib/            # Utilities (~28 files)
+│       ├── lib/            # Utilities (~40 files)
 │       │   ├── deepbook/   # SDK integration, margin config/transactions
 │       │   ├── simulation/ # Demo mode engine, storage, presets
 │       │   ├── signals/    # RSI, MACD, risk scoring
 │       │   └── gamification/ # XP, streaks, achievements
-│       └── context/        # SwipeBook global state (~40 reducer actions)
+│       └── context/        # SwipeBook global state (~50 reducer actions)
 │
 ├── engine/                 # Market maker bot (TypeScript/Node.js)
 │   └── src/
 │       ├── index.ts        # Entry point, vault bootstrap
 │       ├── marketMaker.ts  # Spread order loop, balance monitoring
 │       ├── config.ts       # Environment configuration
-│       └── types.ts        # Type definitions, 17 mainnet pools
+│       └── types.ts        # Type definitions, 18 mainnet pools
 │
 ├── packages/               # Sui Move smart contracts (mainnet)
 │   ├── amm/                # AMM vault: deposit, withdraw, spread orders
@@ -157,6 +167,18 @@ tapx/
 | NS/SUI | NS | SUI |
 
 Additional mainnet pools: WUSDT/USDC, WUSDC/USDC, BETH/USDC, TYPUS/SUI, SUI/AUSD, AUSD/USDC, DRF/SUI, SEND/USDC, XBTC/USDC, NAVX/SUI, CETUS/SUI, TURBOS/SUI, AFSUI/SUI, HASUI/SUI, VSUI/SUI
+
+## Testnet Pools (7)
+
+| Pool | Base | Quote |
+|------|------|-------|
+| SUI/DBUSDC | SUI | DBUSDC |
+| DEEP/SUI | DEEP | SUI |
+| DEEP/DBUSDC | DEEP | DBUSDC |
+| DBUSDT/DBUSDC | DBUSDT | DBUSDC |
+| WAL/DBUSDC | WAL | DBUSDC |
+| WAL/SUI | WAL | SUI |
+| DBTC/DBUSDC | DBTC | DBUSDC |
 
 ## Smart Contracts (Mainnet)
 

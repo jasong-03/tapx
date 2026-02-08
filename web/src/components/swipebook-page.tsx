@@ -25,7 +25,7 @@ import { useUserBalance } from "@/hooks/useUserBalance"
 import { useMarginManager } from "@/hooks/swipebook/useMarginManager"
 import { useMarginPosition } from "@/hooks/swipebook/useMarginPosition"
 import { getSwipeBookPools } from "@/lib/deepbook/pools"
-import { MARGIN_POOL_KEYS, type MarginPoolKey } from "@/lib/deepbook/margin-config"
+import { MARGIN_POOL_KEYS, type MarginPoolKey, getMaxLeverage } from "@/lib/deepbook/margin-config"
 import type { Pool } from "@/lib/swipebook/types"
 import type { SwipeBookView } from "@/lib/swipebook/types"
 
@@ -79,6 +79,7 @@ function TapTradeContent() {
     setPredictionMode,
     setQuickTradeState,
     setActivePrediction,
+    setLeverage,
   } = useSwipeBook()
 
   const isQuickMode = state.predictionMode === 'quick'
@@ -169,7 +170,15 @@ function TapTradeContent() {
     // Pool changed — clear Quick Trade state to avoid stale overlays
     setActivePrediction(null)
     setQuickTradeState('idle')
-  }, [selectedPool.poolKey, setActivePrediction, setQuickTradeState])
+
+    // Auto-cap leverage if current selection exceeds pool's max
+    if (poolSupportsMargin) {
+      const max = getMaxLeverage(selectedPool.poolKey as MarginPoolKey)
+      if (state.selectedLeverage > max) {
+        setLeverage(max)
+      }
+    }
+  }, [selectedPool.poolKey, setActivePrediction, setQuickTradeState, poolSupportsMargin, state.selectedLeverage, setLeverage])
 
   // Cleanup old order tiles
   useEffect(() => {

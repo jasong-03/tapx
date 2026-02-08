@@ -2,7 +2,7 @@
 
 import dynamic from "next/dynamic"
 
-const QuickTradePage = dynamic(() => import("@/components/quick-trade-page"), {
+const GridTradePage = dynamic(() => import("@/components/grid-trade-page"), {
   ssr: false,
   loading: () => (
     <div className="flex items-center justify-center h-screen bg-slate-950">
@@ -12,5 +12,5 @@ const QuickTradePage = dynamic(() => import("@/components/quick-trade-page"), {
 })
 
 export default function Page() {
-  return <QuickTradePage />
+  return <GridTradePage />
 }
