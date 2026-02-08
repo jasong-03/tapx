@@ -7,6 +7,7 @@ import {
   buildMarketBuyTransaction,
   buildMarketSellTransaction,
   calculateMinOutput,
+  estimateSwapOutput,
 } from '@/lib/deepbook/transactions';
 import { getUserFriendlyError } from '@/lib/deepbook/tx-utils';
 import { useDeepBookClient } from './useDeepBookClient';
@@ -15,7 +16,7 @@ interface ExecuteTradeParams {
   pool: Pool;
   side: TradeSide;
   amount: number;           // Human-readable amount
-  estimatedOutput: number;  // Human-readable estimated output
+  estimatedOutput: number;  // Human-readable estimated output (fallback)
   slippagePercent: number;  // e.g., 0.5 for 0.5%
 }
 
@@ -34,7 +35,7 @@ export function useTradeExecution() {
 
   const { mutate, mutateAsync, isPending, error, reset } = useMutation({
     mutationFn: async (params: ExecuteTradeParams): Promise<TradeResult> => {
-      const { pool, side, amount, estimatedOutput, slippagePercent } = params;
+      const { pool, side, amount, slippagePercent } = params;
 
       if (!currentAccount) {
         throw new Error('Wallet not connected');
@@ -43,7 +44,17 @@ export function useTradeExecution() {
         throw new Error('DeepBook client not initialized');
       }
 
-      const minOut = calculateMinOutput(estimatedOutput, slippagePercent);
+      // Pre-check: estimate real output from the orderbook via devInspect.
+      // This catches "no liquidity" BEFORE prompting the wallet popup.
+      const estimate = await estimateSwapOutput(suiClient, pool, side, amount);
+
+      if (estimate.output <= 0) {
+        throw new Error('Not enough liquidity in the pool. Try a smaller amount or different pair.');
+      }
+
+      // Use the real estimated output for minOut (much more accurate than price-based estimate)
+      const realEstimate = estimate.output;
+      const minOut = calculateMinOutput(realEstimate, slippagePercent);
       let tx: Transaction;
 
       if (side === 'buy') {

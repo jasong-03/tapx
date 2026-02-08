@@ -8,15 +8,17 @@ import { LeverageSelector } from './LeverageSelector';
 import { TimeframeSelector } from './TimeframeSelector';
 import { MarginHealthGauge } from './MarginHealthGauge';
 import type { PredictionDirection, PredictionRound } from '@/context/SwipeBookContext';
+import type { MarginPosition } from '@/hooks/swipebook/useMarginPosition';
 
 interface QuickTradeControlsProps {
   currentPrice: number | null;
   poolKey: string;
   stake: number;
   riskRatio?: number;
+  marginPosition?: MarginPosition | null;
 }
 
-export function QuickTradeControls({ currentPrice, poolKey, stake, riskRatio }: QuickTradeControlsProps) {
+export function QuickTradeControls({ currentPrice, poolKey, stake, riskRatio, marginPosition }: QuickTradeControlsProps) {
   const {
     state,
     setQuickTradeState,
@@ -112,10 +114,19 @@ export function QuickTradeControls({ currentPrice, poolKey, stake, riskRatio }: 
     setCloseError(null);
 
     try {
+      // Use real on-chain position balance instead of stored baseQuantity.
+      // Market orders can partial-fill, so the actual position may differ
+      // from the requested quantity. Using the stale baseQuantity causes
+      // MoveAbort code 3 (reduce-only quantity exceeds position).
+      const isLong = activePrediction.direction === 'long';
+      const onChainQuantity = marginPosition
+        ? (isLong ? marginPosition.baseBalance : marginPosition.baseDebt)
+        : activePrediction.baseQuantity;
+
       const result = await closePosition({
         poolKey: activePrediction.poolKey,
-        quantity: activePrediction.baseQuantity,
-        isLong: activePrediction.direction === 'long',
+        quantity: onChainQuantity,
+        isLong,
       });
 
       const exitPrice = currentPrice;
@@ -149,7 +160,7 @@ export function QuickTradeControls({ currentPrice, poolKey, stake, riskRatio }: 
       setCloseError(err instanceof Error ? err.message : 'Close failed');
       setQuickTradeState('watching'); // Go back to watching — user can retry manually
     }
-  }, [activePrediction, currentPrice, closePosition, setQuickTradeState, setActivePrediction, addRound]);
+  }, [activePrediction, currentPrice, marginPosition, closePosition, setQuickTradeState, setActivePrediction, addRound]);
 
   const isDisabled = quickTradeState !== 'idle' || !currentPrice;
   const isActive = quickTradeState === 'watching' || quickTradeState === 'closing';

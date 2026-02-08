@@ -31,6 +31,14 @@ const TESTNET_MARGIN_POOLS = {
     quoteDecimals: 6,
     maxLeverage: 3,
   },
+  DBTC_DBUSDC: {
+    poolKey: 'DBTC_DBUSDC',
+    baseCoin: 'DBTC',
+    quoteCoin: 'DBUSDC',
+    baseDecimals: 8,
+    quoteDecimals: 6,
+    maxLeverage: 3,
+  },
 } as const;
 
 const MAINNET_MARGIN_POOLS = {

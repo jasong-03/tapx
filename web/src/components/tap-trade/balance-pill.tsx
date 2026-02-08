@@ -3,20 +3,30 @@
 import { Wallet, Loader2 } from "lucide-react"
 
 interface BalancePillProps {
-  balance: number | null
-  coinSymbol: string
+  baseBalance: number | null
+  quoteBalance: number | null
+  baseCoin: string
+  quoteCoin: string
   isLoading?: boolean
   isConnected?: boolean
 }
 
-export function BalancePill({ balance, coinSymbol, isLoading, isConnected }: BalancePillProps) {
+function fmt(n: number): string {
+  if (n >= 1000) return n.toFixed(0)
+  if (n >= 1) return n.toFixed(2)
+  return n.toFixed(4)
+}
+
+export function BalancePill({ baseBalance, quoteBalance, baseCoin, quoteCoin, isLoading, isConnected }: BalancePillProps) {
   let display: string
   if (!isConnected) {
     display = "Connect wallet"
   } else if (isLoading) {
     display = "..."
   } else {
-    display = `${(balance ?? 0).toFixed(2)} ${coinSymbol}`
+    const b = fmt(baseBalance ?? 0)
+    const q = fmt(quoteBalance ?? 0)
+    display = `${b} ${baseCoin} · ${q} ${quoteCoin}`
   }
 
   return (

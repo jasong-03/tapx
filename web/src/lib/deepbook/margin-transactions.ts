@@ -228,15 +228,22 @@ export function buildOpenShortOps(
 
 /**
  * Build close position operations (curried).
- * Flow: reduce-only market order → repay debt → withdraw settled amounts
+ * Flow: market order (reverse direction) → repay debt → withdraw settled amounts
+ *
+ * Uses a regular placeMarketOrder instead of placeReduceOnlyMarketOrder.
+ * The reduce-only variant aborts with ENotReduceOnlyOrder (code 3) when the
+ * quote output from selling all base exceeds the net quote debt — which is
+ * always the case for profitable longs (and even at breakeven, because
+ * collateral was converted to base). A regular market sell + explicit repay
+ * achieves the same result without the over-strict constraint.
  */
 export function buildClosePositionOps(
   dbClient: DeepBookClient,
   params: ClosePositionOpsParams,
 ): (tx: Transaction) => void {
   return (tx: Transaction) => {
-    // 1. Place reduce-only market order (reverse direction)
-    dbClient.poolProxy.placeReduceOnlyMarketOrder({
+    // 1. Market order in reverse direction to unwind position
+    dbClient.poolProxy.placeMarketOrder({
       poolKey: params.poolKey,
       marginManagerKey: params.managerKey,
       clientOrderId: nextClientOrderId(),

@@ -325,3 +325,22 @@ export function getPoolByAddress(address: string): Pool | undefined {
   const pools = SUI_NETWORK === 'testnet' ? TESTNET_POOLS : MAINNET_POOLS;
   return Object.values(pools).find((pool) => pool.address === address);
 }
+
+/**
+ * Map any pool key (including testnet) to its mainnet equivalent.
+ * Used by the price streamer to always fetch live prices from mainnet orderbooks.
+ */
+const TESTNET_TO_MAINNET_KEY: Record<string, string> = {
+  DEEP_SUI: 'DEEP_SUI',
+  SUI_DBUSDC: 'SUI_USDC',
+  DEEP_DBUSDC: 'DEEP_USDC',
+  DBUSDT_DBUSDC: 'WUSDT_USDC',
+  WAL_DBUSDC: 'WAL_USDC',
+  WAL_SUI: 'WAL_SUI',
+  DBTC_DBUSDC: 'XBTC_USDC',
+};
+
+export function getMainnetPool(poolKey: string): Pool | undefined {
+  const mainnetKey = TESTNET_TO_MAINNET_KEY[poolKey] ?? poolKey;
+  return MAINNET_POOLS[mainnetKey];
+}

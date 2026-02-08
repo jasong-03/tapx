@@ -100,6 +100,7 @@ const POOL_COINS: Record<string, [string, string]> = {
   SUI_DBUSDC: ['SUI', 'DBUSDC'],
   DEEP_SUI: ['DEEP', 'SUI'],
   DEEP_DBUSDC: ['DEEP', 'DBUSDC'],
+  DBTC_DBUSDC: ['DBTC', 'DBUSDC'],
   // Mainnet
   SUI_USDC: ['SUI', 'USDC'],
   DEEP_USDC: ['DEEP', 'USDC'],
