@@ -6,8 +6,7 @@ import { useCurrentAccount } from "@mysten/dapp-kit-react"
 import { SwipeBookProvider, useSwipeBook } from "@/context/SwipeBookContext"
 import { ViewLayout } from "@/components/tap-trade/shared/ViewLayout"
 import { TradingLayout } from "@/components/tap-trade/shared/TradingLayout"
-import { PortfolioView } from "@/components/swipebook/PortfolioView"
-import { TradeHistory } from "@/components/swipebook/TradeHistory"
+import { PositionsDashboard } from "@/components/swipebook/PositionsDashboard"
 import { UnifiedChart } from "@/components/tap-trade/unified-chart"
 import { Toast } from "@/components/tap-trade/toast"
 import { QuickTradeControls } from "@/components/tap-trade/QuickTradeControls"
@@ -85,30 +84,16 @@ function QuickTradeContent() {
     [router, setView]
   )
 
-  // Render portfolio view
-  if (state.currentView === "portfolio") {
+  // Render portfolio/positions view
+  if (state.currentView === "portfolio" || state.currentView === "history") {
     return (
       <ViewLayout
-        title="Portfolio"
+        title="Positions"
         currentView={state.currentView}
         onViewChange={handleViewChange}
         isAuthenticated={!!currentAccount}
       >
-        <PortfolioView />
-      </ViewLayout>
-    )
-  }
-
-  // Render history view
-  if (state.currentView === "history") {
-    return (
-      <ViewLayout
-        title="Trade History"
-        currentView={state.currentView}
-        onViewChange={handleViewChange}
-        isAuthenticated={!!currentAccount}
-      >
-        <TradeHistory />
+        <PositionsDashboard />
       </ViewLayout>
     )
   }

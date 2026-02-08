@@ -52,6 +52,17 @@ function nextClientOrderId(): string {
 const MIN_QUOTE_QUANTITY = 0.01; // minimum quote amount for market orders
 const MIN_BASE_QUANTITY = 0.000001; // minimum base amount for market orders
 
+// Safety factor for market order base quantity to account for order book spread.
+// The base quantity is computed from the mid/mark price, but actual fills use the
+// order book ask/bid price. This buffer prevents the quote cost from exceeding
+// the available balance in the BalanceManager.
+const MARKET_ORDER_SPREAD_FACTOR = 0.98;
+
+// Safety factor for conditional order quantities to account for market order slippage.
+// Market orders may fill slightly less than requested; conditional orders (TP/SL)
+// must reference a smaller quantity to avoid balance_manager::withdraw_with_proof abort 3.
+const CONDITIONAL_ORDER_SAFETY_FACTOR = 0.97;
+
 /**
  * Align a base quantity to the pool's lot_size.
  * The on-chain contract requires: (quantity_raw % lot_size_raw) == 0.
@@ -173,7 +184,7 @@ export function buildOpenLongOps(
       clientOrderId: nextClientOrderId(),
       isBid: true,
       quantity: baseQuantity,
-      payWithDeep: true,
+      payWithDeep: false,
     })(tx);
   };
 
@@ -220,7 +231,7 @@ export function buildOpenShortOps(
       clientOrderId: nextClientOrderId(),
       isBid: false,
       quantity: borrowBase,
-      payWithDeep: true,
+      payWithDeep: false,
     })(tx);
   };
 
@@ -254,7 +265,7 @@ export function buildClosePositionOps(
           clientOrderId: nextClientOrderId(),
           isBid: !params.isLong,
           quantity: params.quantity,
-          payWithDeep: true,
+          payWithDeep: false,
         })(tx);
       } else {
         dbClient.poolProxy.placeMarketOrder({
@@ -263,7 +274,7 @@ export function buildClosePositionOps(
           clientOrderId: nextClientOrderId(),
           isBid: !params.isLong,
           quantity: params.quantity,
-          payWithDeep: true,
+          payWithDeep: false,
         })(tx);
       }
     }
@@ -328,7 +339,7 @@ export function buildMarginLimitOrderOps(
       isBid: params.direction === 'long',
       price: params.targetPrice,
       quantity: baseQuantity,
-      payWithDeep: true,
+      payWithDeep: false,
     })(tx);
   };
 }
@@ -436,8 +447,10 @@ export function buildOpenWithTPSLOps(
   let borrowBase: number | undefined;
 
   if (isLong) {
-    // Long: borrow quote, buy base
-    const rawBaseQuantity = totalQuote / params.currentPrice;
+    // Long: borrow quote, buy base.
+    // Apply spread factor so the quote cost stays within the BalanceManager balance
+    // even when the order book ask price exceeds the mid/mark price.
+    const rawBaseQuantity = (totalQuote / params.currentPrice) * MARKET_ORDER_SPREAD_FACTOR;
     baseQuantity = alignToLotSize(rawBaseQuantity, params.lotSize);
   } else {
     // Short: borrow base, sell base
@@ -449,6 +462,20 @@ export function buildOpenWithTPSLOps(
   if (baseQuantity < MIN_BASE_QUANTITY) {
     throw new Error(`Order base quantity too small: ${baseQuantity}. Increase collateral or leverage.`);
   }
+
+  // Conditional orders use a reduced quantity to account for:
+  // 1. Market order slippage (partial fills)
+  // 2. Fees deducted from output when payWithDeep=false
+  // Without this, balance_manager::withdraw_with_proof aborts (error 3).
+  // If the reduced quantity rounds to 0 after lot-size alignment (small positions),
+  // fall back to baseQuantity to avoid validate_inputs abort 1 (quantity > 0).
+  const alignedConditional = alignToLotSize(
+    baseQuantity * CONDITIONAL_ORDER_SAFETY_FACTOR,
+    params.lotSize,
+  );
+  const conditionalBaseQuantity = alignedConditional > 0 ? alignedConditional : baseQuantity;
+
+  console.log('[buildOpenWithTPSL] lotSize:', params.lotSize, 'baseQty:', baseQuantity, 'conditionalQty:', conditionalBaseQuantity);
 
   // Generate unique conditional order IDs
   const tpOrderId = nextClientOrderId();
@@ -477,18 +504,25 @@ export function buildOpenWithTPSLOps(
     }
 
     // 3. Market order (enter position)
+    // payWithDeep=false: fees are deducted from traded tokens instead of DEEP.
+    // This avoids abort 3 on non-whitelisted pools (SUI/DBUSDC) where the
+    // BalanceManager has no DEEP deposited. Whitelisted pools (0 fees) are unaffected.
     dbClient.poolProxy.placeMarketOrder({
       poolKey: params.poolKey,
       marginManagerKey: params.managerKey,
       clientOrderId: nextClientOrderId(),
       isBid: isLong,
       quantity: baseQuantity,
-      payWithDeep: true,
+      payWithDeep: false,
     })(tx);
 
-    // 4. Add TP conditional order
+    // 4. Add TP conditional order (uses reduced quantity to account for slippage + fees)
     // Long TP: trigger when price goes ABOVE tpPrice (triggerBelowPrice=false)
     // Short TP: trigger when price goes BELOW tpPrice (triggerBelowPrice=true)
+    // NOTE: Conditional orders MUST use payWithDeep=true — the TPSL module rejects
+    // payWithDeep=false with EInvalidOrderParams (abort 6). For whitelisted pools
+    // (0 fees) this is free. For non-whitelisted pools, DEEP balance is needed at
+    // execution time — handled during settlement.
     dbClient.marginTPSL.addConditionalOrder({
       marginManagerKey: params.managerKey,
       conditionalOrderId: tpOrderId,
@@ -496,13 +530,13 @@ export function buildOpenWithTPSLOps(
       triggerPrice: params.tpPrice,
       pendingOrder: {
         clientOrderId: nextClientOrderId(),
-        quantity: baseQuantity,
+        quantity: conditionalBaseQuantity,
         isBid: !isLong, // Reverse to close: Long close = sell (false), Short close = buy (true)
         payWithDeep: true,
       },
     })(tx);
 
-    // 5. Add SL conditional order
+    // 5. Add SL conditional order (uses reduced quantity to account for slippage + fees)
     // Long SL: trigger when price goes BELOW slPrice (triggerBelowPrice=true)
     // Short SL: trigger when price goes ABOVE slPrice (triggerBelowPrice=false)
     dbClient.marginTPSL.addConditionalOrder({
@@ -512,7 +546,7 @@ export function buildOpenWithTPSLOps(
       triggerPrice: params.slPrice,
       pendingOrder: {
         clientOrderId: nextClientOrderId(),
-        quantity: baseQuantity,
+        quantity: conditionalBaseQuantity,
         isBid: !isLong, // Same direction as TP (closing)
         payWithDeep: true,
       },
@@ -582,7 +616,7 @@ export function buildCloseEarlyOps(
           clientOrderId: nextClientOrderId(),
           isBid: !params.isLong,
           quantity: params.quantity,
-          payWithDeep: true,
+          payWithDeep: false,
         })(tx);
       } else {
         dbClient.poolProxy.placeMarketOrder({
@@ -591,7 +625,7 @@ export function buildCloseEarlyOps(
           clientOrderId: nextClientOrderId(),
           isBid: !params.isLong,
           quantity: params.quantity,
-          payWithDeep: true,
+          payWithDeep: false,
         })(tx);
       }
     }

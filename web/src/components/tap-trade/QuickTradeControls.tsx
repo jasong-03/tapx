@@ -2,8 +2,10 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowUp, ArrowDown } from 'lucide-react';
+import { useCurrentAccount } from '@mysten/dapp-kit-react';
 import { useSwipeBook } from '@/context/SwipeBookContext';
 import { useMarginTradeExecution } from '@/hooks/swipebook/useMarginTradeExecution';
+import { useTradeHistory } from '@/hooks/swipebook/useTradeHistory';
 import {
   TARGET_PERCENT_OPTIONS,
   LEVERAGE_OPTIONS,
@@ -11,8 +13,10 @@ import {
   MARGIN_POOL_KEYS,
   calculateTPSLPrices,
 } from '@/lib/deepbook/margin-config';
+import { getPool } from '@/lib/deepbook/pools';
 import { CountdownRing } from './CountdownRing';
 import type { PredictionDirection, PredictionRound } from '@/context/SwipeBookContext';
+import { useStaleDebtDetector } from '@/hooks/swipebook/useStaleDebtDetector';
 import type { MarginPosition } from '@/hooks/swipebook/useMarginPosition';
 import type { MarginManager } from '@mysten/deepbook-v3';
 
@@ -56,7 +60,11 @@ export function QuickTradeControls({
     predictionMode,
   } = state;
 
-  const { openPositionWithTPSL, settleTPSL, closeEarly, forceRepay } = useMarginTradeExecution(marginManagers);
+  const currentAccount = useCurrentAccount();
+  const { openPositionWithTPSL, settleTPSL, closeEarly, forceRepay, swapAndRepay } = useMarginTradeExecution(marginManagers);
+  const { hasStaleDebt, staleDebts, isScanning: isDebtScanning, rescan: rescanDebt } = useStaleDebtDetector(marginManagers);
+  const { addTrade, updateTrade } = useTradeHistory(currentAccount?.address);
+  const activeTradeIdRef = useRef<string | null>(null);
   const currentPriceRef = useRef(currentPrice);
   currentPriceRef.current = currentPrice;
 
@@ -65,6 +73,7 @@ export function QuickTradeControls({
   const [error, setError] = useState<string | null>(null);
   const [isRepaying, setIsRepaying] = useState(false);
   const [hasStuckPosition, setHasStuckPosition] = useState(false);
+  const [debtBannerDismissed, setDebtBannerDismissed] = useState(false);
 
   // Calculate live PnL
   useEffect(() => {
@@ -173,6 +182,17 @@ export function QuickTradeControls({
       addRound(completedRound);
       setQuickTradeState('result');
 
+      // Update persistent trade history
+      if (activeTradeIdRef.current) {
+        updateTrade(activeTradeIdRef.current, {
+          exitPrice,
+          pnl,
+          result: isWin ? 'win' : 'loss',
+          closedAt: Date.now(),
+        });
+        activeTradeIdRef.current = null;
+      }
+
       setTimeout(() => {
         setActivePrediction(null);
         setQuickTradeState('idle');
@@ -182,7 +202,7 @@ export function QuickTradeControls({
       setError(err instanceof Error ? err.message : 'Failed to settle position');
       setQuickTradeState('triggered'); // Stay in triggered so user can retry
     }
-  }, [activePrediction, poolKey, settleTPSL, setQuickTradeState, setActivePrediction, addRound]);
+  }, [activePrediction, poolKey, settleTPSL, setQuickTradeState, setActivePrediction, addRound, updateTrade]);
 
   // ── Close early: cancel conditionals + reduce-only + repay ──
   const handleCloseEarly = useCallback(async () => {
@@ -219,6 +239,17 @@ export function QuickTradeControls({
       addRound(completedRound);
       setQuickTradeState('result');
 
+      // Update persistent trade history
+      if (activeTradeIdRef.current) {
+        updateTrade(activeTradeIdRef.current, {
+          exitPrice,
+          pnl,
+          result: pnl > 0 ? 'win' : 'loss',
+          closedAt: Date.now(),
+        });
+        activeTradeIdRef.current = null;
+      }
+
       setTimeout(() => {
         setActivePrediction(null);
         setQuickTradeState('idle');
@@ -228,7 +259,28 @@ export function QuickTradeControls({
       setError(err instanceof Error ? err.message : 'Failed to close position');
       setQuickTradeState('watching'); // Stay in watching so user can retry
     }
-  }, [activePrediction, poolKey, closeEarly, setQuickTradeState, setActivePrediction, addRound]);
+  }, [activePrediction, poolKey, closeEarly, setQuickTradeState, setActivePrediction, addRound, updateTrade]);
+
+  // Swap tokens + repay debt (for when user doesn't have the debt token)
+  const handleSwapAndRepay = useCallback(async () => {
+    if (staleDebts.length === 0) return;
+    setIsRepaying(true);
+    setError(null);
+    try {
+      const debt = staleDebts[0];
+      await swapAndRepay(debt.poolKey, debt.baseDebt, debt.quoteDebt);
+      setHasStuckPosition(false);
+      setDebtBannerDismissed(false);
+      setError(null);
+      rescanDebt();
+    } catch (err) {
+      console.error('[handleSwapAndRepay] failed:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(msg.length > 150 ? msg.slice(0, 150) + '...' : msg);
+    } finally {
+      setIsRepaying(false);
+    }
+  }, [staleDebts, swapAndRepay, rescanDebt]);
 
   // Force-repay all debt across all known margin pools to clear error 4
   const handleForceRepay = useCallback(async () => {
@@ -248,7 +300,9 @@ export function QuickTradeControls({
       }
       if (anySuccess) {
         setHasStuckPosition(false);
+        setDebtBannerDismissed(false);
         setError(null);
+        rescanDebt();
       } else {
         setError('No positions found to close.');
       }
@@ -257,7 +311,7 @@ export function QuickTradeControls({
     } finally {
       setIsRepaying(false);
     }
-  }, [marginManagers, forceRepay]);
+  }, [marginManagers, forceRepay, rescanDebt]);
 
   // ── Open position with TP/SL ──
   const handleDirection = useCallback(async (direction: PredictionDirection) => {
@@ -304,11 +358,38 @@ export function QuickTradeControls({
 
       setActivePrediction(round);
       setQuickTradeState('watching');
+
+      // Record trade in persistent history
+      const pool = getPool(poolKey);
+      const tradeId = `${Date.now()}_${poolKey}_${Math.random().toString(36).slice(2, 8)}`;
+      activeTradeIdRef.current = tradeId;
+      addTrade({
+        id: tradeId,
+        poolKey,
+        mode: 'quick',
+        direction,
+        baseCoin: pool?.baseCoin ?? poolKey.split('_')[0],
+        quoteCoin: pool?.quoteCoin ?? poolKey.split('_')[1],
+        baseAmount: result.baseQuantity,
+        quoteAmount: stake,
+        entryPrice: result.entryPrice,
+        exitPrice: null,
+        pnl: null,
+        result: 'closed',
+        leverage: selectedLeverage,
+        targetPercent: selectedTargetPercent,
+        timestamp: Date.now(),
+        closedAt: null,
+        txDigest: result.digest,
+      });
     } catch (err) {
       console.error('Failed to open position:', err);
       const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes('Insufficient') && msg.includes('balance')) {
-        // Friendly insufficient balance warning
+      if (msg.includes('Swap & Repay')) {
+        // Stale debt detected, wallet doesn't have enough — show stuck position UI
+        setError(msg);
+        setHasStuckPosition(true);
+      } else if (msg.includes('Insufficient') && msg.includes('balance')) {
         setError(msg);
       } else if (msg.includes('"margin_manager"') && msg.includes(', 4)')) {
         setError('Existing position open. Close it first before trading.');
@@ -320,7 +401,7 @@ export function QuickTradeControls({
       }
       setQuickTradeState('idle');
     }
-  }, [quickTradeState, currentPrice, predictionMode, poolKey, stake, selectedLeverage, selectedTargetPercent, selectedTimeframe, openPositionWithTPSL, setQuickTradeState, setActivePrediction]);
+  }, [quickTradeState, currentPrice, predictionMode, poolKey, stake, selectedLeverage, selectedTargetPercent, selectedTimeframe, openPositionWithTPSL, setQuickTradeState, setActivePrediction, addTrade]);
 
   const isDisabled = quickTradeState !== 'idle' || !currentPrice;
   const isOpening = quickTradeState === 'opening';
@@ -461,9 +542,46 @@ export function QuickTradeControls({
     ? (selectedLeverage * targetOption.value / 100 + 1).toFixed(1)
     : '1.0';
 
+  // Show stale debt banner when no active position but on-chain debt exists
+  const showDebtBanner = hasStaleDebt && !activePrediction && quickTradeState === 'idle' && !debtBannerDismissed;
+
   // ─── IDLE STATE: Selectors + UP/DOWN ───────────────────────────────
   return (
     <div className="flex flex-col gap-2 sm:gap-3 px-3 sm:px-4 py-2 sm:py-3">
+      {/* Stale debt recovery banner */}
+      {showDebtBanner && (
+        <div className="flex flex-col gap-2 bg-amber-500/10 border border-amber-500/20 rounded-xl px-3 py-2">
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] text-amber-400 font-bold">Stuck position detected</span>
+            <button onClick={() => setDebtBannerDismissed(true)} className="text-amber-400/60 hover:text-amber-400 text-xs ml-2">✕</button>
+          </div>
+          {staleDebts.map(d => (
+            <div key={d.poolKey} className="text-[10px] text-white/50">
+              {d.poolKey}: {d.baseDebt > 0 ? `${d.baseDebt.toFixed(2)} base debt` : ''}{d.baseDebt > 0 && d.quoteDebt > 0 ? ' + ' : ''}{d.quoteDebt > 0 ? `${d.quoteDebt.toFixed(2)} quote debt` : ''}
+            </div>
+          ))}
+          <div className="text-[10px] text-white/40">
+            An old position left debt on-chain. Repay to unlock trading.
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={handleSwapAndRepay}
+              disabled={isRepaying}
+              className="flex-1 py-2 rounded-lg text-xs font-bold bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 hover:bg-cyan-500/30 disabled:opacity-50"
+            >
+              {isRepaying ? 'Processing...' : 'Swap & Repay'}
+            </button>
+            <button
+              onClick={handleForceRepay}
+              disabled={isRepaying}
+              className="flex-1 py-2 rounded-lg text-xs font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30 hover:bg-amber-500/30 disabled:opacity-50"
+            >
+              {isRepaying ? 'Clearing...' : 'Direct Repay'}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Error banner with force-repay option */}
       {error && quickTradeState === 'idle' && (
         <div className="flex flex-col gap-2 bg-red-500/10 border border-red-500/20 rounded-xl px-3 py-2">
@@ -472,13 +590,22 @@ export function QuickTradeControls({
             <button onClick={() => { setError(null); setHasStuckPosition(false); }} className="text-red-400/60 hover:text-red-400 text-xs ml-2">✕</button>
           </div>
           {hasStuckPosition && (
-            <button
-              onClick={handleForceRepay}
-              disabled={isRepaying}
-              className="w-full py-2 rounded-lg text-xs font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30 hover:bg-amber-500/30 disabled:opacity-50"
-            >
-              {isRepaying ? 'Clearing position...' : 'Close Existing Position & Repay Debt'}
-            </button>
+            <div className="flex gap-2">
+              <button
+                onClick={handleSwapAndRepay}
+                disabled={isRepaying}
+                className="flex-1 py-2 rounded-lg text-xs font-bold bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 hover:bg-cyan-500/30 disabled:opacity-50"
+              >
+                {isRepaying ? 'Processing...' : 'Swap & Repay'}
+              </button>
+              <button
+                onClick={handleForceRepay}
+                disabled={isRepaying}
+                className="flex-1 py-2 rounded-lg text-xs font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30 hover:bg-amber-500/30 disabled:opacity-50"
+              >
+                {isRepaying ? 'Clearing...' : 'Direct Repay'}
+              </button>
+            </div>
           )}
         </div>
       )}

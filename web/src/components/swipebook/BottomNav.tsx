@@ -51,8 +51,8 @@ export const BottomNav = React.memo(function BottomNav({
     },
     {
       id: 'portfolio',
-      label: 'Portfolio',
-      icon: String.fromCodePoint(0x1F4B0), // Money bag
+      label: 'Positions',
+      icon: String.fromCodePoint(0x1F4CA), // Bar chart
       action: () => onViewChange('portfolio'),
     },
     {
