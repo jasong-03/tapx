@@ -77,8 +77,8 @@ export function HeroSection() {
           transition={{ delay: 1.2, duration: 0.6 }}
           className="max-w-lg text-base text-muted-foreground sm:text-lg"
         >
-          The mobile-first DeFi trading experience on Sui.
-          Swipe tokens, trade with leverage, and compete on the leaderboard.
+          The DeFi trading platform built on Sui.
+          Tap to trade, predict with leverage, and earn real on-chain rewards.
         </motion.p>
 
         {/* CTA buttons */}
