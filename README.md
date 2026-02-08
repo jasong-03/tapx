@@ -2,9 +2,9 @@
 
 **Tap a price grid, execute real DeFi trades on Sui.**
 
-TapX is a mobile-first trading interface built on DeepBook (Sui's native order book). Instead of complex order forms, users tap cells on an interactive price grid to instantly execute on-chain market orders. A session-based margin trading engine enables leveraged predictions with take-profit/stop-loss automation.
+TapX is a DeFi trading platform built on DeepBook (Sui's native order book). Instead of complex order forms, users tap cells on an interactive price grid to instantly execute on-chain market orders. A session-based margin trading engine enables leveraged predictions with take-profit/stop-loss automation.
 
-Built for [HackMoney 2026](https://hackmoney.xyz) | Powered by [Sui](https://sui.io) and [DeepBook](https://deepbook.tech)
+Built for [HackMoney 2026](https://ethglobal.com/events/hackmoney2026/home) | Powered by [Sui](https://sui.io) and [DeepBook](https://deepbook.tech)
 
 ---
 
