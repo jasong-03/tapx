@@ -60,3 +60,28 @@ export function calculateLeveragedMultiplier(
   const distance = Math.abs(targetPrice - currentPrice) / currentPrice;
   return leverage * distance * 100; // as percentage
 }
+
+/**
+ * Calculate grid-mode multiplier (Xx format) that accounts for
+ * price distance, leverage, and time column (closer expiry = higher mult).
+ *
+ * Far price + close time = highest multiplier
+ * Close price + far time = lowest multiplier
+ */
+export function calculateGridMultiplier(
+  currentPrice: number,
+  targetPrice: number,
+  leverage: number,
+  col: number,
+  totalCols: number,
+  feeIn = 0.05,
+  feeWin = 0.05,
+  baseMulti = 1.5,
+): number {
+  const r = Math.abs(targetPrice - currentPrice) / currentPrice;
+  // Closer columns (sooner expiry) get higher effective leverage
+  const effectiveLeverage = leverage * (1 + (totalCols - col) / totalCols);
+  const grossMultiple = baseMulti + effectiveLeverage * r * 100;
+  const netMultiple = (1 - feeIn) * (1 - feeWin) * grossMultiple;
+  return Math.max(1, netMultiple);
+}

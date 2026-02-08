@@ -2,11 +2,11 @@
 
 import type React from "react"
 import { useEffect, useRef, useState, useCallback } from "react"
-import { calculateMultiplier, formatMultiplier, calculateLeveragedMultiplier } from "@/lib/tap-trade/multipliers"
+import { calculateMultiplier, formatMultiplier, calculateLeveragedMultiplier, calculateGridMultiplier, formatMultiplierX } from "@/lib/tap-trade/multipliers"
 import type { PriceTick } from "@/lib/tap-trade/binance"
 import type { Bet } from "@/lib/tap-trade/betting"
 import type { PredictionMode, PredictionRound, QuickTradeState } from "@/context/SwipeBookContext"
-import { calculateLiquidationPrice } from "@/lib/deepbook/margin-config"
+// liquidation overlay removed — cell glow only
 
 interface UnifiedChartProps {
   priceHistory: PriceTick[]
@@ -35,6 +35,7 @@ interface UnifiedChartProps {
   // Grid mode props
   predictionMode?: PredictionMode
   selectedLeverage?: number
+  gridDisabled?: boolean
 }
 
 interface HitAnimation {
@@ -61,6 +62,7 @@ export function UnifiedChart({
   quickTradeState,
   predictionMode = 'quick',
   selectedLeverage = 2,
+  gridDisabled = false,
 }: UnifiedChartProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -276,13 +278,20 @@ export function UnifiedChart({
               if (!isTooClose && isAffordable) {
                 // Grid mode: direction-based colored cells
                 const direction = cellCenterPrice > (currentPrice ?? 0) ? 'long' : 'short';
-                const leveragedMult = calculateLeveragedMultiplier(
+                const gridMult = calculateGridMultiplier(
                   currentPrice ?? 1,
                   cellCenterPrice,
                   selectedLeverage,
+                  col,
+                  cols,
                 );
-                const intensity = Math.min(leveragedMult / 30, 1);
-                const alpha = (0.1 + intensity * 0.4).toFixed(2);
+                // Dim cells too close to current price (would fail on-chain TPSL validation)
+                const priceDist = Math.abs(cellCenterPrice - (currentPrice ?? 0));
+                const minDist = (currentPrice ?? 1) * 0.0005; // 0.05% matches MIN_TPSL_DISTANCE_PCT
+                const isTooNear = priceDist < minDist;
+                const dimFactor = gridDisabled ? 0.3 : isTooNear ? 0.15 : 1;
+                const intensity = Math.min((gridMult - 1) / 3, 1);
+                const alpha = ((0.15 + intensity * 0.45) * dimFactor).toFixed(2);
 
                 if (direction === 'long') {
                   ctx.fillStyle = `rgba(0, 255, 136, ${alpha})`;
@@ -296,17 +305,17 @@ export function UnifiedChart({
                 const cellLeftX2 = getX(currentSlotStart + col * timeStepMs);
                 ctx.fillRect(cellLeftX2, cellTopY2, cellWidth, cellBottomY2 - cellTopY2);
 
-                // Multiplier label
-                if (leveragedMult >= 1) {
-                  ctx.fillStyle = "rgba(255, 255, 255, 0.8)";
+                // Multiplier label (Xx format)
+                if (gridMult >= 1.1) {
+                  ctx.fillStyle = `rgba(255, 255, 255, ${(0.8 * dimFactor).toFixed(2)})`;
                   ctx.font = isMobile ? "8px monospace" : "10px monospace";
                   ctx.textAlign = "center";
                   ctx.textBaseline = "middle";
-                  ctx.fillText(`${leveragedMult.toFixed(1)}%`, cellCenterX, cellCenterY);
+                  ctx.fillText(formatMultiplierX(gridMult), cellCenterX, cellCenterY);
                 }
 
-                // Hover highlight for grid mode
-                if (isHovered) {
+                // Hover highlight for grid mode (only when not disabled)
+                if (isHovered && !gridDisabled) {
                   ctx.strokeStyle = "rgba(255, 255, 255, 0.6)";
                   ctx.lineWidth = 1.5;
                   const cellTopY3 = priceToY(price + priceStep);
@@ -463,11 +472,13 @@ export function UnifiedChart({
           ctx.shadowBlur = 5
           ctx.fillStyle = "rgba(239, 68, 68, 0.4)"
         } else {
-          ctx.shadowColor = "rgba(180, 255, 100, 0.6)"
-          ctx.shadowBlur = 10
+          // Active bet — pulsing glow
+          const pulse = 0.6 + 0.4 * Math.sin(twinklePhaseRef.current * 3)
+          ctx.shadowColor = `rgba(180, 255, 100, ${pulse})`
+          ctx.shadowBlur = 12 + 8 * pulse
           const openGradient = ctx.createLinearGradient(tileX, tileY, tileX + tileW, tileY + tileH)
-          openGradient.addColorStop(0, "rgba(180, 255, 100, 0.9)")
-          openGradient.addColorStop(1, "rgba(255, 230, 80, 0.8)")
+          openGradient.addColorStop(0, `rgba(180, 255, 100, ${0.7 + 0.3 * pulse})`)
+          openGradient.addColorStop(1, `rgba(255, 230, 80, ${0.6 + 0.3 * pulse})`)
           ctx.fillStyle = openGradient
         }
 
@@ -695,103 +706,7 @@ export function UnifiedChart({
         }
       }
 
-      // === Margin Trade Overlays ===
-      if (activePrediction && (quickTradeState === 'watching' || quickTradeState === 'closing' || quickTradeState === 'result')) {
-        const entryY = priceToY(activePrediction.entryPrice)
-
-        // Entry price line (dashed, neon green)
-        ctx.save()
-        ctx.setLineDash([8, 4])
-        ctx.strokeStyle = "#00ff88"
-        ctx.lineWidth = 1
-        ctx.beginPath()
-        ctx.moveTo(padding.left, entryY)
-        ctx.lineTo(dimensions.width - padding.right, entryY)
-        ctx.stroke()
-        ctx.setLineDash([])
-
-        // Entry label
-        ctx.fillStyle = "#00ff88"
-        ctx.font = "bold 9px monospace"
-        ctx.textAlign = "left"
-        ctx.fillText(`Entry $${activePrediction.entryPrice.toFixed(4)}`, padding.left + 4, entryY - 4)
-
-        // Liquidation price line (dashed, red)
-        const liqPrice = calculateLiquidationPrice(
-          activePrediction.entryPrice,
-          activePrediction.leverage,
-          activePrediction.direction === 'long',
-        )
-        const liqY = priceToY(liqPrice)
-
-        ctx.setLineDash([4, 4])
-        ctx.strokeStyle = "#ff4444"
-        ctx.lineWidth = 1
-        ctx.beginPath()
-        ctx.moveTo(padding.left, liqY)
-        ctx.lineTo(dimensions.width - padding.right, liqY)
-        ctx.stroke()
-        ctx.setLineDash([])
-
-        // Liq label
-        ctx.fillStyle = "#ff4444"
-        ctx.font = "bold 9px monospace"
-        ctx.fillText(`Liq $${liqPrice.toFixed(4)}`, padding.left + 4, liqY - 4)
-
-        // PnL overlay (centered)
-        if (currentPrice) {
-          const priceDiff = currentPrice - activePrediction.entryPrice
-          const pnl = activePrediction.direction === 'long'
-            ? priceDiff * activePrediction.collateral * activePrediction.leverage / activePrediction.entryPrice
-            : -priceDiff * activePrediction.collateral * activePrediction.leverage / activePrediction.entryPrice
-          const pnlDecimals = Math.abs(pnl) < 0.01 ? 4 : 2
-          const pnlText = pnl >= 0 ? `+$${pnl.toFixed(pnlDecimals)}` : `-$${Math.abs(pnl).toFixed(pnlDecimals)}`
-          ctx.fillStyle = pnl >= 0 ? "#00ff88" : "#ff4444"
-          ctx.font = "bold 24px monospace"
-          ctx.textAlign = "center"
-          ctx.textBaseline = "middle"
-          ctx.fillText(pnlText, dimensions.width / 2, dimensions.height / 2 - 20)
-
-          // PnL percentage below
-          const pnlPct = (pnl / activePrediction.collateral) * 100
-          ctx.font = "14px monospace"
-          ctx.fillText(`${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%`, dimensions.width / 2, dimensions.height / 2 + 8)
-        }
-
-        // Countdown ring (top-right)
-        if (quickTradeState === 'watching') {
-          const elapsed = (now - activePrediction.startedAt) / 1000
-          const progress = Math.min(1, elapsed / activePrediction.timeframe)
-          const remaining = Math.max(0, activePrediction.timeframe - elapsed)
-          const cx = dimensions.width - padding.right - 30
-          const cy = padding.top + 30
-          const radius = 20
-
-          // Background ring
-          ctx.beginPath()
-          ctx.arc(cx, cy, radius, 0, Math.PI * 2)
-          ctx.strokeStyle = "rgba(255, 255, 255, 0.1)"
-          ctx.lineWidth = 3
-          ctx.stroke()
-
-          // Progress ring
-          const angle = progress * Math.PI * 2
-          ctx.beginPath()
-          ctx.arc(cx, cy, radius, -Math.PI / 2, -Math.PI / 2 + angle)
-          ctx.strokeStyle = progress > 0.8 ? "#ff4444" : "#00ff88"
-          ctx.lineWidth = 3
-          ctx.stroke()
-
-          // Center text
-          ctx.fillStyle = "rgba(255, 255, 255, 0.9)"
-          ctx.font = "bold 12px monospace"
-          ctx.textAlign = "center"
-          ctx.textBaseline = "middle"
-          ctx.fillText(`${Math.ceil(remaining)}`, cx, cy)
-        }
-
-        ctx.restore()
-      }
+      // No margin overlays — the bet cell glow is the only visual feedback
 
       animationRef.current = requestAnimationFrame(draw)
     }
@@ -824,10 +739,13 @@ export function UnifiedChart({
     quickTradeState,
     predictionMode,
     selectedLeverage,
+    gridDisabled,
   ])
 
   const handleClick = useCallback(
     (event: React.MouseEvent<HTMLCanvasElement>) => {
+      if (gridDisabled) return
+
       const rect = event.currentTarget.getBoundingClientRect()
       const x = event.clientX - rect.left
       const y = event.clientY - rect.top
@@ -911,6 +829,7 @@ export function UnifiedChart({
       totalVisibleRows,
       onCellClick,
       isMobile,
+      gridDisabled,
     ],
   )
 
