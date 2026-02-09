@@ -182,6 +182,12 @@ async function addPythPriceUpdates(
   // Fetch fresh VAAs from Hermes v2 API
   const updates = await fetchPriceUpdateData(feedIds);
 
+  const coins = POOL_COINS[poolKey] ?? [];
+  console.log(
+    `%c[PYTH] %cRefreshing ${feedInfo.length} oracle feeds for ${poolKey}: ${coins.join(', ')} → VAA fetched (${updates[0].length} bytes)`,
+    'color: #e6a817; font-weight: bold', 'color: #f0d070'
+  );
+
   if (updates.length > 1) {
     throw new Error('SDK does not support multiple accumulator messages in a single transaction');
   }
@@ -236,6 +242,11 @@ async function addPythPriceUpdates(
     typeArguments: [`${config.pythPackageId}::price_info::PriceInfo`],
   });
 
+  console.log(
+    `%c[PYTH] %cUpdated PriceInfoObjects: ${priceInfoObjectIds.map(id => id.slice(0, 10) + '...').join(', ')} (${config.baseUpdateFee} MIST/feed)`,
+    'color: #e6a817; font-weight: bold', 'color: #f0d070'
+  );
+
   return priceInfoObjectIds;
 }
 
@@ -280,6 +291,11 @@ export async function buildMarginTxWithPythRefresh(
 
   // Now add the margin operations
   buildMarginOps(tx);
+
+  console.log(
+    `%c[PTB] %cMargin tx built with Pyth refresh for: ${keys.join(', ')}`,
+    'color: #00bfff; font-weight: bold', 'color: #88ddff'
+  );
 
   return tx;
 }

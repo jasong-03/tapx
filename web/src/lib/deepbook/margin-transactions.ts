@@ -129,6 +129,11 @@ export async function queryPoolBookParams(
     minSize: Number(minSizeRaw) / baseScalar,
   };
 
+  console.log(
+    `%c[DEEPBOOK] %cPool ${poolKey} book params: lotSize=${params.lotSize}, minSize=${params.minSize}, tickSize=${params.tickSize}`,
+    'color: #8888ff; font-weight: bold', 'color: #bbbbff'
+  );
+
   lotSizeCache.set(poolKey, params);
   return params;
 }
@@ -475,11 +480,22 @@ export function buildOpenWithTPSLOps(
   );
   const conditionalBaseQuantity = alignedConditional > 0 ? alignedConditional : baseQuantity;
 
-  console.log('[buildOpenWithTPSL] lotSize:', params.lotSize, 'baseQty:', baseQuantity, 'conditionalQty:', conditionalBaseQuantity);
-
   // Generate unique conditional order IDs
   const tpOrderId = nextClientOrderId();
   const slOrderId = nextClientOrderId();
+
+  const rawQty = isLong ? (totalQuote / params.currentPrice) * MARKET_ORDER_SPREAD_FACTOR : borrowAmount / params.currentPrice;
+  console.log(
+    `%c[MARGIN PTB] %cBuilding atomic open-position tx:\n` +
+    `  Direction: ${isLong ? 'LONG (buy base)' : 'SHORT (sell base)'}\n` +
+    `  Collateral: ${params.collateral} quote → Borrow: ${borrowAmount.toFixed(4)} (${params.leverage}x leverage)\n` +
+    `  Base Qty: ${baseQuantity} (lot-aligned from ${rawQty.toFixed(6)})\n` +
+    `  Lot Size: ${params.lotSize} | Conditional Qty: ${conditionalBaseQuantity} (×${CONDITIONAL_ORDER_SAFETY_FACTOR})\n` +
+    `  TP: ${params.tpPrice.toFixed(6)} | SL: ${params.slPrice.toFixed(6)}\n` +
+    `  TP Order ID: ${tpOrderId} | SL Order ID: ${slOrderId}\n` +
+    `  Operations: cancelStale → deposit → borrow → marketOrder → addTP → addSL (6 ops, 1 signature)`,
+    'color: #00ff88; font-weight: bold', 'color: #aaffcc'
+  );
 
   const ops = (tx: Transaction) => {
     // 0. Cancel any orphaned conditional orders from previous failed trades.
@@ -567,6 +583,11 @@ export function buildSettleTPSLOps(
   dbClient: DeepBookClient,
   params: { poolKey: string; managerKey: string; isLong: boolean },
 ): (tx: Transaction) => void {
+  console.log(
+    `%c[SETTLE PTB] %cBuilding settlement tx: executeConditionals(max=10) → cancelAll → ${params.isLong ? 'repayQuote' : 'repayBase'} → withdrawSettled`,
+    'color: #ffaa00; font-weight: bold', 'color: #ffcc66'
+  );
+
   return (tx: Transaction) => {
     // 1. Execute any triggered conditional orders (permissionless, max 10)
     dbClient.marginTPSL.executeConditionalOrders(params.managerKey, 10)(tx);
@@ -601,6 +622,11 @@ export function buildCloseEarlyOps(
   params: { poolKey: string; managerKey: string; quantity: number; isLong: boolean; useReduceOnly?: boolean },
 ): (tx: Transaction) => void {
   const useReduceOnly = params.useReduceOnly ?? true;
+
+  console.log(
+    `%c[CLOSE PTB] %cBuilding close-early tx: cancelAll → ${params.quantity > 0 ? (useReduceOnly ? 'reduceOnlyMarketOrder' : 'marketOrder') : 'SKIP (qty=0)'} (qty=${params.quantity}) → ${params.isLong ? 'repayQuote' : 'repayBase'} → withdrawSettled`,
+    'color: #ff6644; font-weight: bold', 'color: #ff9988'
+  );
 
   return (tx: Transaction) => {
     // 1. Cancel all conditional orders first
@@ -684,10 +710,17 @@ export async function queryMarginState(
   const baseScalar = Math.pow(10, pool.baseDecimals);
   const quoteScalar = Math.pow(10, pool.quoteDecimals);
 
-  return {
+  const state = {
     baseAsset: parseU64(rv[3]) / baseScalar,
     quoteAsset: parseU64(rv[4]) / quoteScalar,
     baseDebt: parseU64(rv[5]) / baseScalar,
     quoteDebt: parseU64(rv[6]) / quoteScalar,
   };
+
+  console.log(
+    `%c[MARGIN STATE] %c${poolKey} on-chain: baseAsset=${state.baseAsset.toFixed(6)}, quoteAsset=${state.quoteAsset.toFixed(6)}, baseDebt=${state.baseDebt.toFixed(6)}, quoteDebt=${state.quoteDebt.toFixed(6)}`,
+    'color: #ff88ff; font-weight: bold', 'color: #ffaaff'
+  );
+
+  return state;
 }

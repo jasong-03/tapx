@@ -23,7 +23,7 @@ import {
 } from '@/lib/deepbook/margin-transactions';
 import { buildMarginTxWithPythRefresh } from '@/lib/deepbook/pyth-refresh';
 import { buildMarketBuyTransaction, estimateSwapOutput, calculateMinOutput } from '@/lib/deepbook/transactions';
-import { getPool } from '@/lib/deepbook/pools';
+import { getPool, findPoolsWithBase, findPoolsWithQuote } from '@/lib/deepbook/pools';
 import { MARGIN_POOL_KEYS } from '@/lib/deepbook/margin-config';
 
 interface OpenPositionParams {
@@ -286,6 +286,10 @@ export function useMarginTradeExecution(
    * Swap tokens then repay margin debt in two sequential wallet signatures.
    * TX1: Swap quote→base or base→quote to acquire the debt token
    * TX2: Force-repay (deposit + repay + withdraw)
+   *
+   * Improvements:
+   * - Checks wallet balance first; skips swap if user already has enough tokens
+   * - Tries alternative pools when the debt pool lacks liquidity (abort 12)
    */
   const swapAndRepay = useCallback(async (
     debtPoolKey: string,
@@ -297,60 +301,168 @@ export function useMarginTradeExecution(
     const pool = getPool(debtPoolKey);
     if (!pool) throw new Error(`Unknown pool: ${debtPoolKey}`);
 
-    // Step 1: Swap to acquire the debt token
+    // Step 1: Swap to acquire the debt token (with wallet check + fallback pools)
     if (baseDebt > 0) {
-      // Need base tokens (e.g. DEEP on DEEP_SUI pool).
-      // Strategy: estimate how much quote (SUI) to spend by simulating
-      // a sell of the needed base amount to get the quote price.
       const neededBase = baseDebt * 1.05; // 5% buffer for interest
 
-      // estimateSwapOutput('sell', neededBase) tells us how much quote
-      // we'd GET for selling neededBase — this is roughly the quote cost to buy it
-      const priceEstimate = await estimateSwapOutput(suiClient, pool, 'sell', neededBase);
-      // Add 20% buffer to ensure we get enough base out
-      const quoteToSpend = priceEstimate.output > 0
-        ? priceEstimate.output * 1.20
-        : neededBase * 0.025; // fallback: ~0.025 quote per base (rough DEEP/SUI price)
-
-      console.log(`[swapAndRepay] Buying ~${neededBase.toFixed(2)} ${pool.baseCoin} by spending ~${quoteToSpend.toFixed(4)} ${pool.quoteCoin}`);
-
-      const minBaseOut = calculateMinOutput(neededBase, 10); // 10% slippage tolerance
-      const swapTx = buildMarketBuyTransaction(dbClient, {
-        poolKey: debtPoolKey,
-        quoteAmount: quoteToSpend,
-        minBaseOut,
-        sender: currentAccount.address,
+      // Check if wallet already has enough of the base token
+      const baseBal = await suiClient.getBalance({
+        owner: currentAccount.address,
+        coinType: pool.baseType,
       });
+      const walletBase = Number(baseBal.totalBalance) / Math.pow(10, pool.baseDecimals);
 
-      console.log('[swapAndRepay] Step 1/2: Sign swap tx...');
-      await signAndExecuteDirect(dAppKit, suiClient, swapTx);
-      console.log('[swapAndRepay] Swap complete');
+      if (walletBase >= neededBase) {
+        console.log(`[swapAndRepay] Wallet has ${walletBase.toFixed(4)} ${pool.baseCoin}, enough to repay. Skipping swap.`);
+      } else {
+        // Only buy the shortfall — wallet already has some tokens
+        const shortfall = (neededBase - walletBase) * 1.05; // extra 5% buffer on shortfall
+        console.log(`[swapAndRepay] Wallet has ${walletBase.toFixed(4)} ${pool.baseCoin}, need ${neededBase.toFixed(4)}, shortfall ~${shortfall.toFixed(4)}`);
+
+        // Find all pools where the debt token is the base (for alternative swap routes)
+        const allPools = findPoolsWithBase(pool.baseType);
+        // Debt pool first, then alternatives
+        const poolsToTry = [pool, ...allPools.filter(p => p.poolKey !== pool.poolKey)];
+
+        let swapSucceeded = false;
+        const triedPools: string[] = [];
+
+        for (const swapPool of poolsToTry) {
+          triedPools.push(swapPool.poolKey);
+
+          // Check if user has enough quote token on this pool
+          const quoteBal = await suiClient.getBalance({
+            owner: currentAccount.address,
+            coinType: swapPool.quoteType,
+          });
+          const walletQuote = Number(quoteBal.totalBalance) / Math.pow(10, swapPool.quoteDecimals);
+          const gasBuffer = swapPool.quoteType.includes('::sui::SUI') ? 0.15 : 0;
+
+          if (walletQuote <= gasBuffer) {
+            console.log(`[swapAndRepay] No ${swapPool.quoteCoin} balance for ${swapPool.poolKey}, skipping`);
+            continue;
+          }
+
+          try {
+            // Estimate swap cost (for the shortfall only, not full debt)
+            const priceEstimate = await estimateSwapOutput(suiClient, swapPool, 'sell', shortfall);
+            const quoteToSpend = priceEstimate.output > 0
+              ? Math.min(priceEstimate.output * 1.20, walletQuote - gasBuffer)
+              : Math.min(shortfall * 0.025, walletQuote - gasBuffer);
+
+            if (quoteToSpend <= 0) {
+              console.log(`[swapAndRepay] Not enough ${swapPool.quoteCoin} for swap on ${swapPool.poolKey}`);
+              continue;
+            }
+
+            console.log(`[swapAndRepay] Trying ${swapPool.poolKey}: Buying ~${shortfall.toFixed(2)} ${pool.baseCoin} by spending ~${quoteToSpend.toFixed(4)} ${swapPool.quoteCoin}`);
+
+            const minBaseOut = calculateMinOutput(shortfall, 15); // 15% slippage for thin liquidity
+            const swapTx = buildMarketBuyTransaction(dbClient, {
+              poolKey: swapPool.poolKey,
+              quoteAmount: quoteToSpend,
+              minBaseOut,
+              sender: currentAccount.address,
+            });
+
+            console.log(`[swapAndRepay] Step 1/2: Sign swap tx on ${swapPool.poolKey}...`);
+            await signAndExecuteDirect(dAppKit, suiClient, swapTx);
+            console.log(`[swapAndRepay] Swap via ${swapPool.poolKey} complete`);
+            swapSucceeded = true;
+            break;
+          } catch (err) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            console.warn(`[swapAndRepay] Swap via ${swapPool.poolKey} failed:`, errMsg);
+            // Continue to next pool
+          }
+        }
+
+        if (!swapSucceeded) {
+          throw new Error(
+            `Could not acquire ~${shortfall.toFixed(2)} ${pool.baseCoin} (have ${walletBase.toFixed(2)}, need ${neededBase.toFixed(2)}). ` +
+            `Pools tried: ${triedPools.join(', ')} — all lack liquidity. ` +
+            `Get ${pool.baseCoin} tokens manually, then use "Direct Repay".`,
+          );
+        }
+      }
 
     } else if (quoteDebt > 0) {
-      // Need quote tokens. Sell base to get quote.
       const neededQuote = quoteDebt * 1.05;
 
-      // Estimate base amount needed by checking how much base yields neededQuote
-      const priceEstimate = await estimateSwapOutput(suiClient, pool, 'buy', neededQuote);
-      const baseToSell = priceEstimate.output > 0
-        ? priceEstimate.output * 1.20
-        : neededQuote * 50; // fallback
+      // Check if wallet already has enough quote token
+      const quoteBal = await suiClient.getBalance({
+        owner: currentAccount.address,
+        coinType: pool.quoteType,
+      });
+      const walletQuote = Number(quoteBal.totalBalance) / Math.pow(10, pool.quoteDecimals);
 
-      console.log(`[swapAndRepay] Selling ~${baseToSell.toFixed(4)} ${pool.baseCoin} for ~${neededQuote.toFixed(2)} ${pool.quoteCoin}`);
+      if (walletQuote >= neededQuote) {
+        console.log(`[swapAndRepay] Wallet has ${walletQuote.toFixed(4)} ${pool.quoteCoin}, enough to repay. Skipping swap.`);
+      } else {
+        const shortfall = (neededQuote - walletQuote) * 1.05;
+        console.log(`[swapAndRepay] Wallet has ${walletQuote.toFixed(4)} ${pool.quoteCoin}, need ${neededQuote.toFixed(4)}, shortfall ~${shortfall.toFixed(4)}`);
 
-      const swapTx = new Transaction();
-      swapTx.setSenderIfNotSet(currentAccount.address);
-      const [base, quote, deep] = dbClient.deepBook.swapExactBaseForQuote({
-        poolKey: debtPoolKey,
-        amount: baseToSell,
-        deepAmount: 0,
-        minOut: calculateMinOutput(neededQuote, 10),
-      })(swapTx);
-      swapTx.transferObjects([base, quote, deep], currentAccount.address);
+        // Find all pools where the debt token is the quote
+        const allPools = findPoolsWithQuote(pool.quoteType);
+        const poolsToTry = [pool, ...allPools.filter(p => p.poolKey !== pool.poolKey)];
 
-      console.log('[swapAndRepay] Step 1/2: Sign swap tx...');
-      await signAndExecuteDirect(dAppKit, suiClient, swapTx);
-      console.log('[swapAndRepay] Swap complete');
+        let swapSucceeded = false;
+        const triedPools: string[] = [];
+
+        for (const swapPool of poolsToTry) {
+          triedPools.push(swapPool.poolKey);
+
+          // Check if user has enough base token on this pool to sell
+          const baseBal = await suiClient.getBalance({
+            owner: currentAccount.address,
+            coinType: swapPool.baseType,
+          });
+          const walletBaseAmt = Number(baseBal.totalBalance) / Math.pow(10, swapPool.baseDecimals);
+
+          if (walletBaseAmt <= 0) {
+            console.log(`[swapAndRepay] No ${swapPool.baseCoin} balance for ${swapPool.poolKey}, skipping`);
+            continue;
+          }
+
+          try {
+            const priceEstimate = await estimateSwapOutput(suiClient, swapPool, 'buy', shortfall);
+            const baseToSell = priceEstimate.output > 0
+              ? Math.min(priceEstimate.output * 1.20, walletBaseAmt)
+              : Math.min(shortfall * 50, walletBaseAmt);
+
+            if (baseToSell <= 0) continue;
+
+            console.log(`[swapAndRepay] Trying ${swapPool.poolKey}: Selling ~${baseToSell.toFixed(4)} ${swapPool.baseCoin} for ~${shortfall.toFixed(2)} ${pool.quoteCoin}`);
+
+            const swapTx = new Transaction();
+            swapTx.setSenderIfNotSet(currentAccount.address);
+            const [base, quote, deep] = dbClient.deepBook.swapExactBaseForQuote({
+              poolKey: swapPool.poolKey,
+              amount: baseToSell,
+              deepAmount: 0,
+              minOut: calculateMinOutput(shortfall, 15),
+            })(swapTx);
+            swapTx.transferObjects([base, quote, deep], currentAccount.address);
+
+            console.log(`[swapAndRepay] Step 1/2: Sign swap tx on ${swapPool.poolKey}...`);
+            await signAndExecuteDirect(dAppKit, suiClient, swapTx);
+            console.log(`[swapAndRepay] Swap via ${swapPool.poolKey} complete`);
+            swapSucceeded = true;
+            break;
+          } catch (err) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            console.warn(`[swapAndRepay] Swap via ${swapPool.poolKey} failed:`, errMsg);
+          }
+        }
+
+        if (!swapSucceeded) {
+          throw new Error(
+            `Could not acquire ~${shortfall.toFixed(2)} ${pool.quoteCoin} (have ${walletQuote.toFixed(2)}, need ${neededQuote.toFixed(2)}). ` +
+            `Pools tried: ${triedPools.join(', ')} — all lack liquidity. ` +
+            `Get ${pool.quoteCoin} tokens manually, then use "Direct Repay".`,
+          );
+        }
+      }
     }
 
     // Step 2: Force repay — tokens are now in wallet
@@ -587,6 +699,10 @@ export function useMarginTradeExecution(
       );
 
       const digest = await signAndExecuteDirect(dAppKit, suiClient, tx);
+      console.log(
+        `%c[OPEN] %cPosition opened! tx: ${digest} | baseQty: ${builder.baseQuantity} | TP: ${builder.tpOrderId} | SL: ${builder.slOrderId}`,
+        'color: #00ff88; font-weight: bold', 'color: #aaffcc'
+      );
 
       queryClient.invalidateQueries({ queryKey: ['margin-position'] });
       queryClient.invalidateQueries({ queryKey: ['user-balance'] });
@@ -607,6 +723,10 @@ export function useMarginTradeExecution(
     if (!marginClient || !currentAccount) throw new Error('Not connected');
 
     setIsSettling(true);
+    console.log(
+      `%c[SETTLE] %cSettling ${params.isLong ? 'LONG' : 'SHORT'} position on ${params.poolKey}...`,
+      'color: #ffaa00; font-weight: bold', 'color: #ffcc66'
+    );
     try {
       const managerKey = `${params.poolKey}_MGR`;
 
@@ -623,6 +743,10 @@ export function useMarginTradeExecution(
       );
 
       const digest = await signAndExecuteDirect(dAppKit, suiClient, tx);
+      console.log(
+        `%c[SETTLE] %cSettlement complete! tx: ${digest}`,
+        'color: #00ff00; font-weight: bold', 'color: #88ff88'
+      );
 
       queryClient.invalidateQueries({ queryKey: ['margin-position'] });
       queryClient.invalidateQueries({ queryKey: ['user-balance'] });
@@ -686,6 +810,10 @@ export function useMarginTradeExecution(
       );
 
       const digest = await signAndExecuteDirect(dAppKit, suiClient, tx);
+      console.log(
+        `%c[CLOSE] %cPosition closed early! tx: ${digest}`,
+        'color: #ff6644; font-weight: bold', 'color: #ff9988'
+      );
 
       queryClient.invalidateQueries({ queryKey: ['margin-position'] });
       queryClient.invalidateQueries({ queryKey: ['user-balance'] });
