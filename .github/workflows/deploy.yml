@@ -2,7 +2,7 @@ name: Deploy to EC2
 
 on:
   push:
-    branches: [main, feat/grid-margin-trading]
+    branches: [main]
 
 jobs:
   deploy:
@@ -16,7 +16,8 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
             cd /home/ubuntu/tapx
-            git pull
+            git checkout main
+            git pull origin main
             cd web && npm run build
             cd ../engine && npm run build
             cd ..
