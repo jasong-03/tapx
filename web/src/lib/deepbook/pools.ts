@@ -344,3 +344,20 @@ export function getMainnetPool(poolKey: string): Pool | undefined {
   const mainnetKey = TESTNET_TO_MAINNET_KEY[poolKey] ?? poolKey;
   return MAINNET_POOLS[mainnetKey];
 }
+
+/**
+ * Find all pools where a given coin type is the base token.
+ * Used to find alternative swap routes when the primary pool lacks liquidity.
+ */
+export function findPoolsWithBase(baseType: string): Pool[] {
+  const pools = SUI_NETWORK === 'testnet' ? TESTNET_POOLS : MAINNET_POOLS;
+  return Object.values(pools).filter((p) => p.baseType === baseType);
+}
+
+/**
+ * Find all pools where a given coin type is the quote token.
+ */
+export function findPoolsWithQuote(quoteType: string): Pool[] {
+  const pools = SUI_NETWORK === 'testnet' ? TESTNET_POOLS : MAINNET_POOLS;
+  return Object.values(pools).filter((p) => p.quoteType === quoteType);
+}
